@@ -1,5 +1,8 @@
 #include "rdma/rdma_context.h"
 
+#include <cerrno>
+#include <cstring>
+
 #include "anns/vec_buffer.h"
 #include "coromem/include/backend.h"
 
@@ -149,8 +152,9 @@ void RdmaContext::create_main_partition_mr(
       ibv_reg_mr(pd, for_read_ptr[0], INC(part_length, cacheline), flags);
   if (!for_read_mr[0]) {
     printf(
-        "Failed to create main mr. length: %llu align length: %llu\n",
-        part_length, INC(part_length, cacheline));
+        "Failed to create main mr. length: %llu align length: %llu errno %d "
+        "%s\n",
+        part_length, INC(part_length, cacheline), errno, strerror(errno));
   } else {
     printf(
         "Create main mr success. length: %llu align length: %llu\n",
@@ -318,6 +322,15 @@ struct ibv_qp *RdmaContext::qp_create(
   attr.qp_type = IBV_QPT_RC;
 
   qp = ibv_create_qp(pd, &attr);
+  // rxe often advertises no inline data. Reads and writes here do not use it.
+  if (!qp && param->inline_size > 0) {
+    fprintf(
+        stderr, "ibv_create_qp failed (%s), retrying with inline 0\n",
+        strerror(errno));
+    attr.cap.max_inline_data = 0;
+    qp = ibv_create_qp(pd, &attr);
+    if (qp) param->inline_size = 0;
+  }
 
   if (qp == NULL && errno == ENOMEM) {
     fprintf(
@@ -432,6 +445,16 @@ int RdmaContext::modify_qp_to_rtr(
   attr->ah_attr.dlid = dest->lid;
   attr->ah_attr.sl = param->sl;
   attr->ah_attr.is_global = 0;
+  // RoCE, including Soft-RoCE, has LID 0. The path is the GRH.
+  if (param->link_type == IBV_LINK_LAYER_ETHERNET) {
+    int sgid = my_dest->gid_index;
+    if (sgid < 0) sgid = param->gid_index;
+    attr->ah_attr.is_global = 1;
+    attr->ah_attr.grh.dgid = dest->gid;
+    attr->ah_attr.grh.sgid_index = sgid;
+    attr->ah_attr.grh.hop_limit = 64;
+    attr->ah_attr.grh.traffic_class = 0;
+  }
 
   attr->path_mtu = param->curr_mtu;
   attr->dest_qp_num = dest->qpn;

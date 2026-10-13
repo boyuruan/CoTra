@@ -1,5 +1,6 @@
 #ifndef UTILS_H
 #define UTILS_H
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>

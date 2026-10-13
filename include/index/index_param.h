@@ -40,7 +40,7 @@ class IndexParameter {
   uint32_t machine_id;  // local machine id.
   uint32_t num_parts;
 
-  uint32_t subset_size_milllions; // vec_num = subset_size_milllions * 1e6
+  uint32_t subset_size_milllions;  // 0: vec_num comes from the bin header
   uint32_t thread_num;
 
   size_t local_max_vid;  // local partitioon max node id

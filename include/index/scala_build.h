@@ -31,8 +31,9 @@ class ScalaBuild {
 
   /*Start rdma server*/
   void init_rdma() {
-    // TODO: temp buffer here.
-    for_read_sz = 1024 * 1024 * 1024;
+    // com_init needs a registered read region. Build messages use the write
+    // buffers. 1GiB on each of two rxe processes returns ENOMEM.
+    for_read_sz = 64 * 1024 * 1024;
     for_read_ptr = (char *)malloc(for_read_sz);
     rdma_comm.com_init(for_read_ptr, for_read_sz, rdma_param);
     rdma_comm.com_read_init();

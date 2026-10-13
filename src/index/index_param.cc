@@ -4,6 +4,7 @@
 #include "diskann/include/program_options_utils.hpp"
 
 AnnsParameter::AnnsParameter(int argc, char **argv, IndexParameter &index_param) {
+  int machine_id_flag = -1;
 
   po::options_description desc{program_options_utils::make_program_description(
       "build_disk_index", "Build a disk-based index.")};
@@ -29,10 +30,6 @@ AnnsParameter::AnnsParameter(int argc, char **argv, IndexParameter &index_param)
     required_configs.add_options()(
         "thread_num,t", po::value<uint32_t>(&thd_num)->required(),
         "TEMP thread");
-    required_configs.add_options()(
-        "million_num,s",
-        po::value<uint32_t>(&subset_size_milllions)->required(),
-        "TEMP million");
 
     required_configs.add_options()(
       "query_path", po::value<std::string>(&query_path)->required(),
@@ -52,6 +49,10 @@ AnnsParameter::AnnsParameter(int argc, char **argv, IndexParameter &index_param)
     optional_configs.add_options()(
       "res_knn", po::value<uint32_t>(&res_knn)->default_value(10),
       "default knn size is 10");
+    optional_configs.add_options()(
+        "machine_id,m",
+        po::value<int>(&machine_id_flag)->default_value(-1),
+        "Override the machine id taken from config_file.");
 
 
     optional_configs.add_options()(
@@ -61,6 +62,11 @@ AnnsParameter::AnnsParameter(int argc, char **argv, IndexParameter &index_param)
     optional_configs.add_options()(
         "query_size,Q", po::value<size_t>(&qsize)->default_value(10000),
         "default query size is 10000");
+    optional_configs.add_options()(
+        "million_num,s",
+        po::value<uint32_t>(&subset_size_milllions)->default_value(0),
+        "If non-zero, must equal the data-file point count in millions. "
+        "Zero uses the count in the file header.");
     
     optional_configs.add_options()(
         "scala_v3", po::bool_switch()->default_value(false), "Search version");
@@ -86,12 +92,18 @@ AnnsParameter::AnnsParameter(int argc, char **argv, IndexParameter &index_param)
     abort();
   }
 
-  machine_id = get_machine_id(config_file);
+  machine_id = resolve_machine_id(machine_id_flag, config_file);
   vecsize = index_param.vec_size;
-  vecnum = subset_size_milllions * 1000000;
-  if(vecnum != index_param.vec_num){
-    std::cerr<<"Missmatch parameter and data file..\n";
-    abort();
+  if (subset_size_milllions == 0) {
+    vecnum = index_param.vec_num;
+  } else {
+    vecnum = static_cast<uint64_t>(subset_size_milllions) * 1000000ull;
+    if (vecnum != index_param.vec_num) {
+      std::cerr << "Missmatch parameter and data file.. -s "
+                << subset_size_milllions << " file count "
+                << index_param.vec_num << "\n";
+      abort();
+    }
   }
   vecdim = index_param.dim;
 
@@ -154,6 +166,7 @@ AnnsParameter::AnnsParameter(int argc, char **argv, IndexParameter &index_param)
 
 
 IndexParameter::IndexParameter(int argc, char **argv) {
+  int machine_id_flag = -1;
   _meta_data_ratio = META_DATA_RATIO;
   num_parts = MACHINE_NUM;
 
@@ -197,13 +210,14 @@ IndexParameter::IndexParameter(int argc, char **argv) {
     required_configs.add_options()(
         "thread_num,t", po::value<uint32_t>(&thread_num)->required(),
         "TEMP thread");
-    required_configs.add_options()(
-        "million_num,s",
-        po::value<uint32_t>(&subset_size_milllions)->required(),
-        "TEMP million");
 
     // Optional parameters
     po::options_description optional_configs("Optional");
+    optional_configs.add_options()(
+        "million_num,s",
+        po::value<uint32_t>(&subset_size_milllions)->default_value(0),
+        "If non-zero, must equal the data-file point count in millions. "
+        "Zero uses the count in the file header.");
     optional_configs.add_options()(
         "num_threads,T",
         po::value<uint32_t>(&num_threads)->default_value(omp_get_num_procs()),
@@ -275,6 +289,10 @@ IndexParameter::IndexParameter(int argc, char **argv) {
     optional_configs.add_options()(
       "sample_percent", po::value<std::string>(&top_sample_percent)->default_value("0.01"), 
       "Top index sampling rate");
+    optional_configs.add_options()(
+        "machine_id,m",
+        po::value<int>(&machine_id_flag)->default_value(-1),
+        "Override the machine id taken from config_file.");
     
             
     // Merge required and optional parameters
@@ -302,7 +320,7 @@ IndexParameter::IndexParameter(int argc, char **argv) {
     abort();
   }
 
-  machine_id = get_machine_id(config_file);
+  machine_id = resolve_machine_id(machine_id_flag, config_file);
 
   bool use_filters = (label_file != "") ? true : false;
   if (dist_fn == std::string("l2"))
@@ -391,6 +409,15 @@ IndexParameter::IndexParameter(int argc, char **argv) {
   // get vector num and dim.
   diskann::get_bin_metadata(data_path, vec_num, dim);
   max_vid = vec_num;
+  if (subset_size_milllions != 0) {
+    uint64_t declared =
+        static_cast<uint64_t>(subset_size_milllions) * 1000000ull;
+    if (declared != vec_num) {
+      std::cerr << "Missmatch parameter and data file.. -s "
+                << subset_size_milllions << " file count " << vec_num << "\n";
+      abort();
+    }
+  }
 
   for (size_t i = 0; i < num_parts; i++) {
     final_part_scala_index_path[i] =

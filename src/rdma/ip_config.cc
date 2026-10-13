@@ -131,6 +131,14 @@ int get_machine_id(std::string config_file) {
   return machine_id;
 }
 
+int resolve_machine_id(int override_id, const std::string &config_file) {
+  if (override_id >= 0) {
+    std::cout << "Local machine ID: " << override_id << std::endl;
+    return override_id;
+  }
+  return get_machine_id(config_file);
+}
+
 
 std::vector<std::string> get_machine_name(std::string config_file){
   std::vector<std::string> machine_name;

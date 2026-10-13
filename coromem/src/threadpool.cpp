@@ -37,9 +37,13 @@ ThreadPool::ThreadPool()
 }
 
 ThreadPool::~ThreadPool() {
+  bool live = false;
+  for (auto &t : threads)
+    if (t.joinable()) live = true;
+  if (!live) return;
   destroyCommon();
   for (auto &t : threads) {
-    t.join();
+    if (t.joinable()) t.join();
   }
 }
 
@@ -47,8 +51,11 @@ void ThreadPool::poolPause() {
   destroyCommon();
   unbindThreadSelf();
   for (auto &t : threads) {
-    t.join();
+    if (t.joinable()) t.join();
   }
+  // poolContiue() emplaces a new thread per slot. A joined std::thread is not
+  // joinable, and joining it again throws std::system_error.
+  threads.clear();
 }
 
 void ThreadPool::poolContiue() {

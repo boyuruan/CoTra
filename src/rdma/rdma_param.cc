@@ -21,6 +21,9 @@ RdmaParameter::RdmaParameter() {
   thread_num = 1;
   machine_num = MACHINE_NUM;
   machine_id = 0;
+  // 0 means "use the device maximum" in ctx_set_out_reads. Leaving this
+  // uninitialized made that check trip on a garbage value.
+  out_reads = 0;
 }
 
 RdmaParameter::RdmaParameter(commandLine &cmd) : RdmaParameter() {
@@ -42,8 +45,9 @@ int RdmaParameter::parser(commandLine &cmd) {
   strcpy(ib_devname, ib_devname_str.c_str());
 
   machine_num = MACHINE_NUM;
-  // machine_id = cmd.getOptionIntValue("-m", 0);
-  machine_id = get_machine_id(ip_config_file);
+  // -m is absent when the default comes back. 0 is a real machine id.
+  int machine_id_flag = cmd.getOptionIntValue("-m", -1);
+  machine_id = resolve_machine_id(machine_id_flag, ip_config_file);
   machine_name = get_machine_name(ip_config_file);
 
   // Set default thread number to max thread to avoid the potential error

@@ -6,9 +6,12 @@
 /* Enable CUDA feature */
 /* #undef CUDA_PATH */
 
+// Override with -DMACHINE_NUM=N. The value is also the partition count.
+#ifndef MACHINE_NUM
 // #define MACHINE_NUM (4)
 // #define MACHINE_NUM (8)
 #define MACHINE_NUM (16)
+#endif
 #define MAX_THREAD_NUM (16)
 #define GROUP_SIZE (16)
 // NOTE: MAX_READ_NUM is the max read num one thread cand send to one machine
@@ -51,8 +54,8 @@
 #define SUCCESS (0)
 #define FAILURE (1)
 
-/* Have AES XTS support */
-#define HAVE_AES_XTS 1
+/* Have AES XTS support. Unused, and it pulls in mlx5dv types. */
+/* #undef HAVE_AES_XTS */
 
 /* Enable CUDA feature */
 /* #undef HAVE_CUDA */
@@ -120,11 +123,11 @@
 /* Define to 1 if you have the <misc/habanalabs.h> header file. */
 /* #undef HAVE_MISC_HABANALABS_H */
 
-/* Have Direct Verbs support */
-#define HAVE_MLX5DV 1
+/* Have Direct Verbs support. Soft-RoCE has no mlx5dv. */
+/* #undef HAVE_MLX5DV */
 
 /* Have MLX5 DEVX support */
-#define HAVE_MLX5_DEVX 1
+/* #undef HAVE_MLX5_DEVX */
 
 /* Enable Neuron benchmarks */
 /* #undef HAVE_NEURON */

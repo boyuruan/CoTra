@@ -898,7 +898,10 @@ char *RdmaCommunication::sync_read(
   std::vector<BufferCache> vecs{
       BufferCache(machine_id, internal_id, internal_id, -1, NULL)};
   post_read(vecs, size);
-  poll_read();
+  if (poll_read()) {
+    fprintf(stderr, "sync_read: poll failed\n");
+    return nullptr;
+  }
   release_cache(vecs[0].buffer_id);
   return vecs[0].buffer_ptr;
 }
@@ -930,6 +933,15 @@ int RdmaCommunication::post_read(
     buf->bufcache_ptr[vec.buffer_id] = vec;
     // printf("postread buf_id %u vid %u\n", vec.buffer_id, vec.vector_id);
     size_t &r = ctx->wr_cnt[m];
+    // Slot r is valid while r < MAX_READ_NUM. Checking after r++ rejects
+    // a batch that fills the array.
+    if (r >= MAX_READ_NUM) {
+      fprintf(
+          stderr,
+          "Error: Exceed the max read wr buffer. n=%zu m=%u r=%zu\n",
+          vectors.size(), m, r);
+      abort();
+    }
     ctx->sge_list[vec.buffer_id].length = vec_size;
 #ifdef COMM_PROFILE
     ctx->read_size += vec_size;
@@ -946,10 +958,6 @@ int RdmaCommunication::post_read(
       machines.emplace_back(m);
     }
     r++;
-    if (r >= MAX_READ_NUM) {
-      printf("Error: Exceed the max read wr buffer.\n");
-      abort();
-    }
   }
 
   for (uint32_t m : machines) {
@@ -966,7 +974,12 @@ int RdmaCommunication::poll_read() {
   // ctx->run_poll_read(vbuf, sbuf);
   ctx->collect_num = 0;
   do {
-    poll_send();
+    // A failed completion never increments collect_num. Returning here
+    // keeps a bad READ from spinning until the process is killed.
+    if (poll_send() < 0) {
+      fprintf(stderr, "poll_read: send completion failed\n");
+      return -1;
+    }
   } while (ctx->collect_num < ctx->post_num);
 
   return 0;

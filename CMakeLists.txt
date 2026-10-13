@@ -1,98 +1,106 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.16)
 project(rdma-anns)
+
+# Compiler and library locations come from the environment. Index builds use
+# LP64 OpenBLAS through third_party/compat/mkl.h, not the cluster ILP64 MKL.
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules")
 
-set(CMAKE_BUILD_TYPE "Release")
-
-message(STATUS "Build CoroMem library")
-
-include(GNUInstallDirs)
-include(CheckCXXCompilerFlag)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-set(CMAKE_CXX_COMPILER /data/share/users/xyzhi/spack/opt/spack/linux-debian9-skylake_avx512/gcc-8.2.0/gcc-11.4.0-dwr4wdspczmg4ssoib2ftvjodmdydhk2/bin/g++)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-SET(CMAKE_CXX_FLAGS  "-Ofast -lrt -DHAVE_CXX0X -march=native -fpic -w -fopenmp -ftree-vectorize -ftree-vectorizer-verbose=0 -shared-libgcc -fcoroutines -fopenmp" )
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag(-fcoroutines COTRA_HAS_FCOROUTINES)
 
-set(CMAKE_THREAD_LIBS_INIT "-lpthread")
+add_compile_options(
+  -Ofast -march=native -fpic -w -fopenmp -ftree-vectorize)
+if(COTRA_HAS_FCOROUTINES)
+  add_compile_options(-fcoroutines)
+endif()
+add_link_options(-fopenmp)
+
+# MACHINE_NUM is the partition count. A command-line -DMACHINE_NUM=N overrides
+# the header default. An index built with one value cannot be read by another.
+set(MACHINE_NUM "16" CACHE STRING "Compile-time machine and partition count")
+add_compile_definitions(MACHINE_NUM=${MACHINE_NUM})
+
+option(COTRA_WITH_INDEX
+  "Build the index and ANN binaries. Needs OpenBLAS, LAPACK, and libaio."
+  OFF)
 
 find_package(Threads REQUIRED)
-find_package(Boost 1.58.0 REQUIRED COMPONENTS serialization iostreams)
+find_package(Boost 1.58.0 REQUIRED
+  COMPONENTS serialization iostreams program_options system filesystem)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(IBVERBS REQUIRED IMPORTED_TARGET libibverbs)
+pkg_check_modules(RDMACM REQUIRED IMPORTED_TARGET librdmacm)
 find_library(MEMCACHED_LIB memcached REQUIRED)
 
-include_directories(./third_party)
-set(THIRD_PARTY_DIR ${CMAKE_SOURCE_DIR}/third_party)
-add_subdirectory(${THIRD_PARTY_DIR})
+include_directories(${CMAKE_SOURCE_DIR}/third_party)
+
+if(COTRA_WITH_INDEX)
+  # Fedora ships OpenBLAS without openblas.pc. Debian and the Intel oneAPI
+  # layout do provide it.
+  pkg_check_modules(OPENBLAS IMPORTED_TARGET openblas)
+  if(TARGET PkgConfig::OPENBLAS)
+    add_library(OpenBLAS::OpenBLAS ALIAS PkgConfig::OPENBLAS)
+  else()
+    find_path(OPENBLAS_INCLUDE_DIR NAMES cblas.h PATH_SUFFIXES openblas
+      REQUIRED)
+    find_library(OPENBLAS_LIB NAMES openblas REQUIRED)
+    add_library(OpenBLAS::OpenBLAS UNKNOWN IMPORTED)
+    set_target_properties(OpenBLAS::OpenBLAS PROPERTIES
+      IMPORTED_LOCATION "${OPENBLAS_LIB}"
+      INTERFACE_INCLUDE_DIRECTORIES "${OPENBLAS_INCLUDE_DIR}")
+  endif()
+  find_library(AIO_LIB aio REQUIRED)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/third_party)
+endif()
 
 add_custom_target(lib)
 add_subdirectory(coromem)
 
-message(STATUS "Build RDMA library")
-
-# for rdma deps
-link_libraries(pthread /usr/lib/x86_64-linux-gnu/libibverbs.so.1 /usr/lib/x86_64-linux-gnu/librdmacm.so.1 ${MEMCACHED_LIB})
-include_directories("${PROJECT_SOURCE_DIR}" "/data/share/project/grasper/rdma-core/build/include")
-
 add_library(rdma_anns)
-file(GLOB sources 
-  ${CMAKE_SOURCE_DIR}/src/*.cc 
-  ${CMAKE_SOURCE_DIR}/src/rdma/*.cc 
-  ${CMAKE_SOURCE_DIR}/src/anns/*.cc 
+file(GLOB sources
+  ${CMAKE_SOURCE_DIR}/src/*.cc
+  ${CMAKE_SOURCE_DIR}/src/rdma/*.cc
+  ${CMAKE_SOURCE_DIR}/src/anns/*.cc
 )
-
 target_sources(rdma_anns PRIVATE ${sources})
-
 target_include_directories(rdma_anns PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+  # Bare includes ("logger.h") inside DiskANN headers. Not global: coromem also
+  # has a utils.h, and a global -I would hide it.
+  ${CMAKE_SOURCE_DIR}/third_party/diskann/include
+)
+target_link_libraries(rdma_anns PUBLIC
+  coromem
+  Threads::Threads
+  PkgConfig::IBVERBS
+  PkgConfig::RDMACM
+  ${MEMCACHED_LIB}
+  Boost::program_options
 )
 
-
-set(POSSIBLE_OMP_PATHS "/data/share/users/xyzhi/new-spack/spack-0.22.2/opt/spack/linux-debian9-skylake_avx512/gcc-8.2.0/intel-oneapi-mkl-2024.0.0-a4e6uj4nsyq4llk43fbax6eobust7uug/compiler/latest/lib/libiomp5.so")
-    
-foreach(POSSIBLE_OMP_PATH ${POSSIBLE_OMP_PATHS})
-    if (EXISTS ${POSSIBLE_OMP_PATH})
-        get_filename_component(OMP_PATH ${POSSIBLE_OMP_PATH} DIRECTORY)
-    endif()
-endforeach()
-link_directories(${OMP_PATH})
-
-set(POSSIBLE_MKL_LIB_PATHS "/data/share/users/xyzhi/new-spack/spack-0.22.2/opt/spack/linux-debian9-skylake_avx512/gcc-8.2.0/intel-oneapi-mkl-2024.0.0-a4e6uj4nsyq4llk43fbax6eobust7uug/mkl/latest/lib/intel64/libmkl_core.so")
-
-foreach(POSSIBLE_MKL_LIB_PATH ${POSSIBLE_MKL_LIB_PATHS})
-    if (EXISTS ${POSSIBLE_MKL_LIB_PATH})
-        get_filename_component(MKL_PATH ${POSSIBLE_MKL_LIB_PATH} DIRECTORY)
-    endif()
-endforeach()
-set(POSSIBLE_MKL_INCLUDE_PATHS "/data/share/users/xyzhi/new-spack/spack-0.22.2/opt/spack/linux-debian9-skylake_avx512/gcc-8.2.0/intel-oneapi-mkl-2024.0.0-a4e6uj4nsyq4llk43fbax6eobust7uug/mkl/latest/include")
-foreach(POSSIBLE_MKL_INCLUDE_PATH ${POSSIBLE_MKL_INCLUDE_PATHS})
-    if (EXISTS ${POSSIBLE_MKL_INCLUDE_PATH})
-        set(MKL_INCLUDE_PATH ${POSSIBLE_MKL_INCLUDE_PATH})
-    endif()
-endforeach()
-MESSAGE(STATUS "index MKL_PATH: ${MKL_PATH}")
-link_directories(${MKL_PATH})
-include_directories(${MKL_INCLUDE_PATH})
-
-find_package(Boost COMPONENTS program_options system filesystem)
-
-link_libraries(mkl_intel_ilp64 mkl_intel_thread mkl_core iomp5 pthread m dl ${Boost_LIBRARIES})
-
-add_library(rdma_index)
-file(GLOB index_sources 
-  ${CMAKE_SOURCE_DIR}/src/index/*.cc
-)
-target_sources(rdma_index PRIVATE ${index_sources})
-target_include_directories(rdma_index PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
+if(COTRA_WITH_INDEX)
+  add_library(rdma_index)
+  file(GLOB index_sources ${CMAKE_SOURCE_DIR}/src/index/*.cc)
+  target_sources(rdma_index PRIVATE ${index_sources})
+  target_include_directories(rdma_index PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    ${CMAKE_SOURCE_DIR}/third_party/compat
+  )
+  target_link_libraries(rdma_index PUBLIC OpenBLAS::OpenBLAS)
+endif()
 
 add_subdirectory(tests)
-
-

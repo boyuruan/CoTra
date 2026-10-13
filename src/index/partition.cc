@@ -30,8 +30,6 @@
 #include <xmmintrin.h>
 #endif
 
-#include <faiss/Index.h>
-#include <faiss/IndexFlat.h>
 #include <filesystem>
 
 #include "coromem/include/utils.h"

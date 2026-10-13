@@ -1,3 +1,5 @@
+#include <unistd.h>
+
 #include "anns/exec_query.h"
 #include "rdma/profiler.h"
 
@@ -25,13 +27,19 @@ int main(int argc, char** argv) {
   }
 
   RdmaCommunication rdma_comm;
-  size_t vec_num = 1000000;
+  // Default is the cluster microbench size. Soft-RoCE on this host returns
+  // ENOMEM from ibv_reg_mr once the region reaches about 2GB, so the
+  // container script passes a smaller -n. The reads below stay inside it.
+  size_t vec_num = cmd.getOptionIntValue("-n", 1000000);
 
   size_t vec_partition_size = MAX_VEC_LEN * vec_num;
   char* vec_partition = (char*)malloc(vec_partition_size);
 
   const int compute_num = 1000;
   int* random_list = (int*)malloc(compute_num * 4);
+  // rand() is not seeded by srand48. Reset it here so both processes fill
+  // the same bytes; the leader compares a remote read against its own buffer.
+  srand(1);
   srand48(41);
   // generate random read list.
   for (int i = 0; i < compute_num; i++) {
@@ -49,11 +57,12 @@ int main(int argc, char** argv) {
   for (int i = 0; i < (vec_partition_size >> 2); i++) {
     data_ptr[i] = rand() % 1000000;
   }
-
   rdma_comm.com_init(vec_partition, vec_partition_size, rdma_param);
 
   if (rdma_param.machine == MEMBER) {
-    for (;;);
+    // An empty for(;;) is undefined under -Ofast and the compiler may
+    // delete it, which drops the MR before the leader's READ.
+    for (;;) sleep(3600);
   } else {
     L2SpaceI l2space(128);
     DISTFUNC<int> fstdistfunc_;
@@ -79,7 +88,16 @@ int main(int argc, char** argv) {
     profiler.start("read-268-B");
     for (int i = 0; i < repeat; i++) {
       int* read_data = (int*)rdma_comm.sync_read(machine_id, i, 268);
-      assert(memcmp(read_data, vec_partition + i * 268) == 0);
+      if (!read_data) return 1;
+      if (memcmp(read_data, vec_partition + i * 268, 268) != 0) {
+        int* expect = (int*)(vec_partition + i * 268);
+        printf("RDMA read mismatch at i=%d\n", i);
+        for (int k = 0; k < 4; k++) {
+          printf("  got %d expect %d\n", read_data[k], expect[k]);
+        }
+        fflush(stdout);
+        return 1;
+      }
     }
     profiler.end("read-268-B");
     profiler.count("read-268-B", repeat - 1);
@@ -89,7 +107,12 @@ int main(int argc, char** argv) {
       profiler.start(name);
       for (int i = 0; i < repeat; i++) {
         int* read_data = (int*)rdma_comm.sync_read(machine_id, i, byte_sz);
-        assert(memcmp(read_data, vec_partition + i * byte_sz) == 0);
+        if (!read_data) return 1;
+        if (memcmp(read_data, vec_partition + i * byte_sz, byte_sz) != 0) {
+          printf("RDMA read mismatch at i=%d size=%d\n", i, byte_sz);
+          fflush(stdout);
+          return 1;
+        }
       }
       profiler.end(name);
       profiler.count(name, repeat - 1);
@@ -97,6 +120,8 @@ int main(int argc, char** argv) {
 
     size_t size_data_per_element_ = 128;
     for (int byte_sz = 128; byte_sz <= 8192; byte_sz <<= 1) {
+      // One post_read chains at most MAX_READ_NUM work requests.
+      if (byte_sz / size_data_per_element_ > MAX_READ_NUM) break;
       std::string name = "async-" + std::to_string(byte_sz) + "-B";
       std::string postn = "async-" + std::to_string(byte_sz) + "-post";
       std::string polln = "async-" + std::to_string(byte_sz) + "-poll";
