@@ -16,14 +16,21 @@ setup_memcached() {
     rm -f /tmp/memcached.pid
   fi
   pkill -x memcached 2>/dev/null || true
-  sleep 0.3
+  # A memcached from an earlier run is not our child, so wait cannot reap it.
+  # Until it exits it holds the port and answers the readiness probe.
+  local i pid
+  for i in $(seq 50); do
+    pgrep -x memcached >/dev/null || break
+    sleep 0.1
+  done
   # Stay a child of this shell so stderr is captured. -d on Ubuntu returns
   # before the daemon is listening, and a failed bind is easy to miss.
   memcached -u memcached -l 127.0.0.1 -p "${PORT}" -c 1024 \
     >/tmp/memcached.log 2>&1 &
-  echo $! >/tmp/memcached.pid
-  local i
+  pid=$!
+  echo "${pid}" >/tmp/memcached.pid
   for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "${pid}" 2>/dev/null || break
     if printf 'set serverNum 0 0 1\r\n0\r\nquit\r\n' \
         | nc -w 2 127.0.0.1 "${PORT}" | grep -q STORED; then
       printf 'set clientNum 0 0 1\r\n0\r\nquit\r\n' \

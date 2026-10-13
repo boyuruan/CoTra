@@ -2281,9 +2281,11 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
 
       // Identify which partition should be selected.
 
+      // The leader is always core. On an exact even split no machine is above
+      // the bar, nobody runs the query, and the issuer waits forever.
       for (uint32_t m = 0; m < MACHINE_NUM; m++) {
         float ratio_m = (float)global_query[query_id]->filter_num[m] / su_cnt;
-        if (ratio_m > 1.0 / (MACHINE_NUM)) {  // core machine ratio bar.
+        if (ratio_m > 1.0 / (MACHINE_NUM) || m == mx_mid) {
           global_query[query_id]->core_machine.emplace_back(m);
           global_query[query_id]->is_core_machine[m] = 1;
         } else {

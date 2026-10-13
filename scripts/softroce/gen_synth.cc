@@ -1,7 +1,10 @@
-// Write a small uint8 base, query file, and id-only ground truth.
-// Query i is an exact copy of a base vector, so brute-force L2 ranks that
-// id first. Ground truth is nq, k, then nq*k uint32 ids and no distances.
+// Write a uint8 base, held-out queries, and id-only ground truth.
+// Points are an 8-d uniform latent mapped linearly into 32-d, so k-means
+// parts are adjacent regions and 10-NN lists cross part boundaries.
+// Ground truth is nq, k, then nq*k uint32 ids and no distances; ties break
+// by smaller id.
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -16,32 +19,40 @@ static void write_u32(std::ofstream &out, uint32_t v) {
 
 int main(int argc, char **argv) {
   std::string dir = argc > 1 ? argv[1] : "/tmp/cotra-synth";
-  const uint32_t n = 4096;
+  const uint32_t n = 20000;
   const uint32_t dim = 32;
-  const uint32_t nq = 32;
+  const uint32_t latent = 8;
+  const uint32_t nq = 200;
   const uint32_t k = 10;
 
   std::mt19937 rng(1);
-  std::vector<uint8_t> base(static_cast<size_t>(n) * dim);
-  for (uint32_t i = 0; i < n; i++) {
-    int center = (i < n / 2) ? 32 : 220;
-    for (uint32_t d = 0; d < dim; d++) {
-      int v = center + static_cast<int>(rng() % 17) - 8;
-      if (v < 0) v = 0;
-      if (v > 255) v = 255;
-      base[static_cast<size_t>(i) * dim + d] = static_cast<uint8_t>(v);
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+  std::vector<double> mix(static_cast<size_t>(dim) * latent);
+  std::vector<double> row_sum(dim, 0.0);
+  for (uint32_t d = 0; d < dim; d++) {
+    for (uint32_t j = 0; j < latent; j++) {
+      mix[d * latent + j] = unit(rng);
+      row_sum[d] += mix[d * latent + j];
     }
   }
 
-  std::vector<uint32_t> qid(nq);
-  std::vector<uint8_t> query(static_cast<size_t>(nq) * dim);
-  for (uint32_t q = 0; q < nq; q++) {
-    qid[q] = (q * n) / nq;
-    for (uint32_t d = 0; d < dim; d++) {
-      query[static_cast<size_t>(q) * dim + d] =
-          base[static_cast<size_t>(qid[q]) * dim + d];
+  auto sample = [&](uint32_t count) {
+    std::vector<uint8_t> out(static_cast<size_t>(count) * dim);
+    std::vector<double> z(latent);
+    for (uint32_t i = 0; i < count; i++) {
+      for (uint32_t j = 0; j < latent; j++) z[j] = unit(rng);
+      for (uint32_t d = 0; d < dim; d++) {
+        double v = 0.0;
+        for (uint32_t j = 0; j < latent; j++) v += mix[d * latent + j] * z[j];
+        long q = std::lround(255.0 * v / row_sum[d]);
+        out[static_cast<size_t>(i) * dim + d] =
+            static_cast<uint8_t>(std::clamp(q, 0L, 255L));
+      }
     }
-  }
+    return out;
+  };
+  std::vector<uint8_t> base = sample(n);
+  std::vector<uint8_t> query = sample(nq);
 
   std::vector<uint32_t> gt(static_cast<size_t>(nq) * k);
   std::vector<std::pair<uint32_t, uint32_t>> dist(n);
@@ -56,10 +67,6 @@ int main(int argc, char **argv) {
       dist[i] = {sum, i};
     }
     std::partial_sort(dist.begin(), dist.begin() + k, dist.end());
-    if (dist[0].second != qid[q] || dist[0].first != 0) {
-      std::cerr << "synthetic gt did not rank the source id first\n";
-      return 1;
-    }
     for (uint32_t j = 0; j < k; j++) {
       gt[static_cast<size_t>(q) * k + j] = dist[j].second;
     }
