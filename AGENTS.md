@@ -66,9 +66,13 @@ recall and the RDMA READ/WRITE byte and operation counts.
  path that brings an exact distance from another machine (`READ`, `MICRO`
  for inline ids sent to a core machine, `RESULT`, `NODE_RESULT`): entries
  delivered, already visited on arrival, accepted as candidates, and dropped
- by the PQ gate. `scripts/softroce/comm_table.py LOG_DIR N --types --chan
- --at R,...` sums the blocks per ef and interpolates the four totals at a
- recall. `DEBUG`, `PROFILER`, `LAT`,
+ by the PQ gate. `Query:` lines split QUERY bytes by purpose (`FORK` to a
+ core machine, `MIGRATE` back to the issuer) and section, `Sync:` splits
+ SYNC bytes by section and counts the neighbor entries sent, and `Work:`
+ counts nodes expanded, node tasks sent, exact and PQ distances on that
+ machine. `scripts/softroce/comm_table.py LOG_DIR N --types --chan
+ --sections --at R,...` sums the blocks per ef and interpolates the four
+ totals at a recall. `DEBUG`, `PROFILER`, `LAT`,
   and `PROF_*` stay off: several change the workload (`DEBUG` runs 5-20
   queries, `PROF_Q_DISTRI` runs 3, the `PROF_*_DISTRI` macros fix `ef` to
   300). Do not commit those enabled, and do not compare numbers produced
@@ -152,6 +156,23 @@ nothing was forked, and the issuer waited for an END that never arrived. A
 2-process run on this synthetic set hung at the first ef before that rule,
 including at `--sample_percent 1.0`. Leave the leader in the core set unless
 you replace that liveness guarantee.
+
+The `scala_v3` wire formats are written by `QueryMsg::fork` and
+`QueryMsg::serialize_end` (`query_msg.h`) and `SyncMsg::serialize`
+(`vec_buffer.h`); each message carries only what its receiver reads. A
+QUERY payload starts with a kind byte: a fork carries ef, origin, leader,
+the core list, lowerBound, the vector and the top list; the END back to the
+issuer carries the result. A SYNC carries the flag bits, the candidate
+pairs, and the receiver's own micro ids and (offset, degree) entries. A
+fork receiver derives its seeds from the top list by the issuer's split
+rule in `coro_sub_query_v5` (entries on the receiver, plus entries on
+non-core machines when the receiver is the leader), using
+`TaskManager::machine_of`. Change that rule in both places or the cores
+start from different seeds. Degrees travel as one byte and counts as two;
+`SyncMsg::serialize` aborts if either overflows. On SIFT1M 4P this
+encoding is about 24% less READ+WRITE at the same recall than the padded
+structs it replaced, and about 48% less together with the PQ gate
+(`sift1m_4p.txt`).
 
 ## Layout
 

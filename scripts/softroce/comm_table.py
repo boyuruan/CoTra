@@ -24,13 +24,17 @@ CHAN = re.compile(
 QUERY = re.compile(
     r"Query: (\w+) Cnt: (\d+) Head: (\d+) Top: (\d+) Cand: (\d+) "
     r"Result: (\d+)")
+# Logs from before the per-receiver SYNC encoding print "Other:" (bytes for
+# machines other than the receiver) and no entry counts; later logs print
+# entry counts and send no other-machine bytes. Missing fields read as 0.
 SYNC = re.compile(
-    r"Sync: Cnt: (\d+) Head: (\d+) Cand: (\d+) Target: (\d+) Other: (\d+) "
-    r"Token: (\d+)")
+    r"Sync: Cnt: (\d+) Head: (\d+) Cand: (\d+) Target: (\d+)"
+    r"(?: Other: (\d+))? Token: (\d+)(?: Micro: (\d+) Large: (\d+))?")
 WORK = re.compile(
     r"Work: Expand: (\d+) NodeTask: (\d+) Dist: (\d+) PqDist: (\d+)")
 QUERY_COLS = ("cnt", "head", "top", "cand", "result")
-SYNC_COLS = ("cnt", "head", "cand", "target", "other", "token")
+SYNC_COLS = ("cnt", "head", "cand", "target", "other", "token", "micro",
+             "large")
 WORK_COLS = ("expand", "node_task", "dist", "pq_dist")
 
 
@@ -60,7 +64,7 @@ def parse(path):
                 continue
             m = SYNC.search(line)
             if m:
-                cur["sync"] = tuple(int(x) for x in m.groups())
+                cur["sync"] = tuple(int(x or 0) for x in m.groups())
                 continue
             m = WORK.search(line)
             if m:
@@ -146,7 +150,8 @@ def main():
             for r in table:
                 v = r.get("query", {}).get(p, (0,) * len(QUERY_COLS))
                 print(f"{r['ef']}\t" + "\t".join(str(x) for x in v))
-        print("\nSYNC bytes by section; target is the receiver's own lists")
+        print("\nSYNC bytes by section; target is the receiver's own lists,"
+              " micro/large are entries sent")
         print("ef\t" + "\t".join(SYNC_COLS))
         for r in table:
             v = r.get("sync", (0,) * len(SYNC_COLS))

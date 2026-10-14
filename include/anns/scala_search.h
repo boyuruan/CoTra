@@ -526,8 +526,8 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
     uint64_t gated[CH_NUM] = {0};
     // [purpose][cnt, head, top, cand, result]
     uint64_t query[2][5] = {{0}};
-    // cnt, head, cand, target, other, token
-    uint64_t sync[6] = {0};
+    // cnt, head, cand, target, token, micro entries, large entries
+    uint64_t sync[7] = {0};
     // expand, node task, exact dist, pq dist
     uint64_t work[4] = {0};
 
@@ -558,8 +558,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
       sync[1] += ctx->sync_head;
       sync[2] += ctx->sync_cand;
       sync[3] += ctx->sync_target;
-      sync[4] += ctx->sync_other;
-      sync[5] += ctx->sync_token;
+      sync[4] += ctx->sync_token;
+      sync[5] += ctx->sync_micro;
+      sync[6] += ctx->sync_large;
       work[0] += ctx->work_expand;
       work[1] += ctx->work_node_task;
       work[2] += ctx->work_dist;
@@ -608,11 +609,12 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
           (unsigned long long)query[p][3], (unsigned long long)query[p][4]);
     }
     printf(
-        "Sync: Cnt: %llu Head: %llu Cand: %llu Target: %llu Other: %llu "
-        "Token: %llu\n",
+        "Sync: Cnt: %llu Head: %llu Cand: %llu Target: %llu Token: %llu "
+        "Micro: %llu Large: %llu\n",
         (unsigned long long)sync[0], (unsigned long long)sync[1],
         (unsigned long long)sync[2], (unsigned long long)sync[3],
-        (unsigned long long)sync[4], (unsigned long long)sync[5]);
+        (unsigned long long)sync[4], (unsigned long long)sync[5],
+        (unsigned long long)sync[6]);
     printf(
         "Work: Expand: %llu NodeTask: %llu Dist: %llu PqDist: %llu\n",
         (unsigned long long)work[0], (unsigned long long)work[1],
@@ -2159,6 +2161,11 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
       }
 
       tman->ba_task_queue = &ba_task_queue;
+      if (graph_index.scala_graph != nullptr) {
+        tman->machine_of = [this](uint32_t id) {
+          return graph_index.scala_graph->get_machine_id(id);
+        };
+      }
     });
     // printf("scala search init over\n");
   }

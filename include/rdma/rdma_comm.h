@@ -293,14 +293,13 @@ class RdmaCommunication {
     // printf(
     //     "[migrate q%d] to m%d buf %d\n", query->query_id, machine_id,
     //     buf_id);
-    // query->serialize(buf->buffer[machine_id][buf_id]);
-    // New migration: no need for visit list.
+    // In scala_v3 a query migrates once, finished, back to its issuer.
 #ifdef COMM_PROFILE
     uint64_t sec[4] = {0, 0, 0, 0};
-    size_t len = query->serialize2(buf->buffer[machine_id][buf_id], sec);
+    size_t len = query->serialize_end(buf->buffer[machine_id][buf_id], sec);
     count_query_sections(1, sec);
 #else
-    size_t len = query->serialize2(buf->buffer[machine_id][buf_id]);
+    size_t len = query->serialize_end(buf->buffer[machine_id][buf_id]);
 #endif
     // post_write_send(machine_id, buf_id, len, QUERY);
     post_write_send(machine_id, buf_id, len, QUERY);
@@ -324,13 +323,12 @@ class RdmaCommunication {
     auto *buf = send_write_buf.getLocal();
     // Collect the sent ack and release the position.
     uint32_t buf_id = get_write_send_buf(machine_id);
-    // New migration: no need for visit list.
 #ifdef COMM_PROFILE
     uint64_t sec[4] = {0, 0, 0, 0};
-    size_t len = query->fork(machine_id, buf->buffer[machine_id][buf_id], sec);
+    size_t len = query->fork(buf->buffer[machine_id][buf_id], sec);
     count_query_sections(0, sec);
 #else
-    size_t len = query->fork(machine_id, buf->buffer[machine_id][buf_id]);
+    size_t len = query->fork(buf->buffer[machine_id][buf_id]);
 #endif
     if(len >= MAX_QUERYBUFFER_SIZE){
       printf("Error: query msg exceed the buffer size.\n");
@@ -403,17 +401,18 @@ class RdmaCommunication {
           query->sync_msg.has_token = 0;
         }
 #ifdef COMM_PROFILE
-        uint64_t sec[4] = {0, 0, 0, 0};
+        uint64_t sec[3] = {0, 0, 0};
         size_t len = query->sync_msg.serialize(buf->buffer[m][buf_id], m, sec);
         auto *ctx = rdma_ctx.getLocal();
         ctx->sync_cnt++;
         ctx->sync_head += sec[0];
         ctx->sync_cand += sec[1];
         ctx->sync_target += sec[2];
-        ctx->sync_other += sec[3];
         ctx->sync_token += query->sync_msg.update_term;
+        ctx->sync_micro += query->sync_msg.core_micro_ngh[m].size();
+        ctx->sync_large += query->sync_msg.core_large_ngh[m].size();
 #else
-        size_t len = query->sync_msg.serialize(buf->buffer[m][buf_id]);
+        size_t len = query->sync_msg.serialize(buf->buffer[m][buf_id], m);
 #endif
         post_write_send(m, buf_id, len, SYNC);
         // printf("q%u post sync to m%u\n", query->query_id, m);

@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <deque>
+#include <functional>
 
 #include "../rdma/rdma_param.h"
 #include "anns/anns_param.h"
@@ -55,6 +56,9 @@ class TaskManager {
   // For migration.
   QueryMsg<dist_t>** global_query{nullptr};
   std::vector<size_t> query_queue;
+  // Global id to the machine holding it. A forked query rebuilds its seed
+  // set with it; the search sets it before any fork can arrive.
+  std::function<uint32_t(uint32_t)> machine_of;
 
   std::mutex schequery_mutex;
   std::vector<ScheduleMsg> schedule_query_queue;
@@ -353,13 +357,13 @@ class TaskManager {
   }
 
   void deserialize_query(char* ptr) {
-    size_t offset = 0;
-    offset += sizeof(size_t);
-    size_t qid = 0;
-    memcpy(&qid, static_cast<const char*>(ptr) + offset, sizeof(qid));
-    // printf("deser query %u\n", qid);
-    global_query[qid]->deserialize_and_merge(ptr);
-    // printf("deser query %u over\n", qid);
+    uint32_t qid = QueryMsg<dist_t>::wire_qid(ptr);
+    if (QueryMsg<dist_t>::wire_kind(ptr) == QueryMsg<dist_t>::QW_FORK &&
+        !machine_of) {
+      printf("Error: fork of q%u arrived before machine_of was set\n", qid);
+      abort();
+    }
+    global_query[qid]->deserialize_and_merge(ptr, local_id, machine_of);
     query_queue.push_back(qid);
     return;
   }
@@ -378,7 +382,7 @@ class TaskManager {
    * TODO: may mv to scala search
    */
   void deserialize_sync(char* ptr) {
-    SyncMsg<dist_t> sync_msg(ptr);
+    SyncMsg<dist_t> sync_msg(ptr, local_id);
     global_query[sync_msg.qid]->update_sub_query(
         local_id, &sync_msg, ba_task_queue);
     // avoke the query.

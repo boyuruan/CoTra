@@ -218,6 +218,33 @@ class QueryMsg {
     return;
   }
 
+  /**
+   * scala_v3 QUERY wire formats. A one-byte kind leads every payload so the
+   * two layouts stay apart; the receiver still tells a fork from an end by
+   * is_new, as it always did.
+   *
+   *   QW_FORK (issuer to a core machine):
+   *     kind u8, qid u32, ef u32, origin u8, leader u8,
+   *     ncore u8, core ids u8[], lowerBound, vector_size u32, vector,
+   *     n_top u32, (dist, id) pairs.
+   *   QW_END (leader back to the issuer):
+   *     kind u8, qid u32, n_res u32, (dist, label u64) entries.
+   *
+   * The fork carries no candidate section: the issuer split its top list
+   * by machine, and the receiver redoes that split (deserialize_and_merge).
+   * The end carries only what proc_res reads; the receiver sets state END.
+   */
+  enum WireKind : uint8_t { QW_FORK = 0, QW_END = 1 };
+
+  static uint8_t wire_kind(const void* src) {
+    return *static_cast<const uint8_t*>(src);
+  }
+  static uint32_t wire_qid(const void* src) {
+    uint32_t qid;
+    memcpy(&qid, static_cast<const char*>(src) + 1, sizeof(qid));
+    return qid;
+  }
+
   // Byte accounting for a serialized query. sec[0] is everything before the
   // top candidates, sec[1] the top candidates, sec[2] the candidate set,
   // sec[3] the result, each including its own count field.
@@ -231,405 +258,161 @@ class QueryMsg {
     sec[3] += res_end - cand_end;
   }
 
-  // New Serialization function, without visit list.
-  size_t serialize2(void* dest, uint64_t* sec = nullptr) {
-    size_t offset = 0;
-    memcpy(static_cast<char*>(dest) + offset, &ef, sizeof(ef));
-    offset += sizeof(ef);
-    memcpy(static_cast<char*>(dest) + offset, &query_id, sizeof(query_id));
-    offset += sizeof(query_id);
-    memcpy(
-        static_cast<char*>(dest) + offset, &origin_machine,
-        sizeof(origin_machine));
-    offset += sizeof(origin_machine);
-
-    memcpy(
-        static_cast<char*>(dest) + offset, &current_node_id,
-        sizeof(current_node_id));
-    offset += sizeof(current_node_id);
-    memcpy(static_cast<char*>(dest) + offset, &lowerBound, sizeof(lowerBound));
-    offset += sizeof(lowerBound);
-    memcpy(static_cast<char*>(dest) + offset, &vector_size, sizeof(vector_size));
-    offset += sizeof(vector_size);
-    memcpy(static_cast<char*>(dest) + offset, vector, vector_size);
-    offset += vector_size;
-    memcpy(static_cast<char*>(dest) + offset, &state, sizeof(state));
-    offset += sizeof(state);
-
-    // Path count, for migration ref.
-    memcpy(static_cast<char*>(dest) + offset, path_cnt, sizeof(path_cnt));
-    offset += sizeof(path_cnt);
-    memcpy(
-        static_cast<char*>(dest) + offset, &max_path_id, sizeof(max_path_id));
-    offset += sizeof(max_path_id);
-    memcpy(
-        static_cast<char*>(dest) + offset, &max_path_cnt, sizeof(max_path_cnt));
-    offset += sizeof(max_path_cnt);
-    memcpy(
-        static_cast<char*>(dest) + offset, &path_length, sizeof(path_length));
-    offset += sizeof(path_length);
-
-    memcpy(
-        static_cast<char*>(dest) + offset, &leader_machine,
-        sizeof(leader_machine));
-    offset += sizeof(leader_machine);
-    // core machines
-    // TODO: use uint32_t to reduce amount.
-    size_t core_machine_size = core_machine.size();
-    memcpy(
-        static_cast<char*>(dest) + offset, &core_machine_size,
-        sizeof(core_machine_size));
-    offset += sizeof(core_machine_size);
-    for (auto m : core_machine) {
-      memcpy(static_cast<char*>(dest) + offset, &m, sizeof(m));
-      offset += sizeof(m);
-    }
-
-    // #ifdef PROFILER
-    //     profiler.serialize(static_cast<char*>(dest), offset);
-    // #endif
-    size_t head_end = offset;
-
-    // Serialize top_candidates
-    // printf("Serialize top_candidates\n");
-    size_t top_candidates_size = top_candidates.size();
-    memcpy(
-        static_cast<char*>(dest) + offset, &top_candidates_size,
-        sizeof(top_candidates_size));
-    offset += sizeof(top_candidates_size);
-
-    while (!top_candidates.empty()) {
-      auto& elem = top_candidates.top();
-      memcpy(static_cast<char*>(dest) + offset, &elem, sizeof(elem));
-      offset += sizeof(elem);
-      top_candidates.pop();
-    }
-    size_t top_end = offset;
-
-    // Serialize candidate_set
-    // TODO: Filter candset
-    std::vector<std::pair<dist_t, uint32_t>> filter_queue;
-    while (!candidate_set.empty()) {
-      auto& elem = candidate_set.top();
-      if (-elem.first < lowerBound) {
-        filter_queue.push_back(elem);
-      }
-      candidate_set.pop();
-    }
-    size_t filter_queue_size = filter_queue.size();
-    memcpy(
-        static_cast<char*>(dest) + offset, &filter_queue_size,
-        sizeof(filter_queue_size));
-    offset += sizeof(filter_queue_size);
-    for (auto filter_ele : filter_queue) {
-      memcpy(
-          static_cast<char*>(dest) + offset, &filter_ele, sizeof(filter_ele));
-      offset += sizeof(filter_ele);
-    }
-    size_t cand_end = offset;
-
-    // size_t candidate_set_size = candidate_set.size();
-    // memcpy(
-    //     static_cast<char*>(dest) + offset, &candidate_set_size,
-    //     sizeof(candidate_set_size));
-    // offset += sizeof(candidate_set_size);
-
-    // while (!candidate_set.empty()) {
-    //   auto& elem = candidate_set.top();
-    //   memcpy(static_cast<char*>(dest) + offset, &elem, sizeof(elem));
-    //   offset += sizeof(elem);
-    //   candidate_set.pop();
-    // }
-
-    // TODO: if the final transmission (state = END), only need the result.
-    // Serialize result
-    size_t result_size = result.size();
-    memcpy(
-        static_cast<char*>(dest) + offset, &result_size, sizeof(result_size));
-    offset += sizeof(result_size);
-
-    while (!result.empty()) {
-      auto& elem = result.top();
-      memcpy(static_cast<char*>(dest) + offset, &elem, sizeof(elem));
-      offset += sizeof(elem);
-      result.pop();
-    }
-    add_sections(sec, head_end, top_end, cand_end, offset);
-
-#ifdef DEBUG
-    memcpy(static_cast<char*>(dest) + offset, tmp_m_cnt, sizeof(tmp_m_cnt));
-    offset += sizeof(tmp_m_cnt);
-#endif
-
-    assert(offset <= MAX_QUERYBUFFER_SIZE);
+  static void check_wire_size(size_t offset) {
     if (offset > MAX_QUERYBUFFER_SIZE) {
       printf("Error: exceed buffer size.\n");
       abort();
     }
+  }
+
+  /**
+   * Write the QW_END payload. Consumes result, as the migration always did.
+   */
+  size_t serialize_end(void* dest, uint64_t* sec = nullptr) {
+    char* base = static_cast<char*>(dest);
+    char* p = base;
+    wire::put<uint8_t>(p, QW_END);
+    wire::put<uint32_t>(p, query_id);
+    size_t head_end = p - base;
+
+    wire::put<uint32_t>(p, result.size());
+    while (!result.empty()) {
+      const std::pair<dist_t, size_t>& elem = result.top();
+      wire::put<dist_t>(p, elem.first);
+      wire::put<uint64_t>(p, elem.second);
+      result.pop();
+    }
+    size_t offset = p - base;
+    add_sections(sec, head_end, head_end, head_end, offset);
+
+#ifdef DEBUG
+    memcpy(p, tmp_m_cnt, sizeof(tmp_m_cnt));
+    offset += sizeof(tmp_m_cnt);
+#endif
+    check_wire_size(offset);
     return offset;
   }
 
   /**
-   * Fork QueryMsg in different core machines.
+   * Write the QW_FORK payload. The same bytes go to every core machine.
    */
-  size_t fork(uint32_t machine_id, void* dest, uint64_t* sec = nullptr) {
-    size_t offset = 0;
-    memcpy(static_cast<char*>(dest) + offset, &ef, sizeof(ef));
-    offset += sizeof(ef);
-    memcpy(static_cast<char*>(dest) + offset, &query_id, sizeof(query_id));
-    offset += sizeof(query_id);
-    memcpy(
-        static_cast<char*>(dest) + offset, &origin_machine,
-        sizeof(origin_machine));
-    offset += sizeof(origin_machine);
-
-    memcpy(
-        static_cast<char*>(dest) + offset, &current_node_id,
-        sizeof(current_node_id));
-    offset += sizeof(current_node_id);
-    memcpy(static_cast<char*>(dest) + offset, &lowerBound, sizeof(lowerBound));
-    offset += sizeof(lowerBound);
-    memcpy(static_cast<char*>(dest) + offset, &vector_size, sizeof(vector_size));
-    offset += sizeof(vector_size);
-    memcpy(static_cast<char*>(dest) + offset, vector, vector_size);
-    offset += vector_size;
-    memcpy(static_cast<char*>(dest) + offset, &state, sizeof(state));
-    offset += sizeof(state);
-
-    // Path count, for migration ref.
-    memcpy(static_cast<char*>(dest) + offset, path_cnt, sizeof(path_cnt));
-    offset += sizeof(path_cnt);
-    memcpy(
-        static_cast<char*>(dest) + offset, &max_path_id, sizeof(max_path_id));
-    offset += sizeof(max_path_id);
-    memcpy(
-        static_cast<char*>(dest) + offset, &max_path_cnt, sizeof(max_path_cnt));
-    offset += sizeof(max_path_cnt);
-    memcpy(
-        static_cast<char*>(dest) + offset, &path_length, sizeof(path_length));
-    offset += sizeof(path_length);
-
-    memcpy(
-        static_cast<char*>(dest) + offset, &leader_machine,
-        sizeof(leader_machine));
-    offset += sizeof(leader_machine);
-    // core machines
-    // TODO: use uint32_t to reduce amount.
-    size_t core_machine_size = core_machine.size();
-    memcpy(
-        static_cast<char*>(dest) + offset, &core_machine_size,
-        sizeof(core_machine_size));
-    offset += sizeof(core_machine_size);
-    for (auto m : core_machine) {
-      memcpy(static_cast<char*>(dest) + offset, &m, sizeof(m));
-      offset += sizeof(m);
+  size_t fork(void* dest, uint64_t* sec = nullptr) {
+    char* base = static_cast<char*>(dest);
+    char* p = base;
+    wire::put<uint8_t>(p, QW_FORK);
+    wire::put<uint32_t>(p, query_id);
+    wire::put<uint32_t>(p, ef);
+    wire::put<uint8_t>(p, origin_machine);
+    wire::put<uint8_t>(p, leader_machine);
+    wire::put<uint8_t>(p, core_machine.size());
+    for (uint32_t m : core_machine) {
+      wire::put<uint8_t>(p, m);
     }
+    wire::put<dist_t>(p, lowerBound);
+    wire::put<uint32_t>(p, vector_size);
+    memcpy(p, vector, vector_size);
+    p += vector_size;
+    size_t head_end = p - base;
 
-    // #ifdef PROFILER
-    //     profiler.serialize(static_cast<char*>(dest), offset);
-    // #endif
-    size_t head_end = offset;
-
-    // Serialize top_candidates
-    // printf("Serialize top_candidates\n");
-    size_t top_candidates_size = top_candidates.size();
-    memcpy(
-        static_cast<char*>(dest) + offset, &top_candidates_size,
-        sizeof(top_candidates_size));
-    offset += sizeof(top_candidates_size);
-
-    auto top_candidates_copy = top_candidates;
-    while (!top_candidates.empty()) {
-      auto& elem = top_candidates.top();
-      memcpy(static_cast<char*>(dest) + offset, &elem, sizeof(elem));
-      offset += sizeof(elem);
-      top_candidates.pop();
+    wire::put<uint32_t>(p, top_candidates.size());
+    auto top_copy = top_candidates;
+    while (!top_copy.empty()) {
+      wire::put(p, top_copy.top());
+      top_copy.pop();
     }
-    swap(top_candidates, top_candidates_copy);
-    size_t top_end = offset;
-
-    // Serialize candidate_set
-    size_t filter_queue_size = filterred[machine_id].size();
-    memcpy(
-        static_cast<char*>(dest) + offset, &filter_queue_size,
-        sizeof(filter_queue_size));
-    offset += sizeof(filter_queue_size);
-    for (auto filter_ele : filterred[machine_id]) {
-      memcpy(
-          static_cast<char*>(dest) + offset, &filter_ele, sizeof(filter_ele));
-      offset += sizeof(filter_ele);
-    }
-    size_t cand_end = offset;
-
-    // TODO: if the final transmission (state = END), only need the result.
-    // Serialize result
-    size_t result_size = result.size();
-    memcpy(
-        static_cast<char*>(dest) + offset, &result_size, sizeof(result_size));
-    offset += sizeof(result_size);
-
-    while (!result.empty()) {
-      auto& elem = result.top();
-      memcpy(static_cast<char*>(dest) + offset, &elem, sizeof(elem));
-      offset += sizeof(elem);
-      result.pop();
-    }
-    add_sections(sec, head_end, top_end, cand_end, offset);
-
-    assert(offset <= MAX_QUERYBUFFER_SIZE);
-    if (offset > MAX_QUERYBUFFER_SIZE) {
-      printf("Error: exceed buffer size.\n");
-      abort();
-    }
+    size_t offset = p - base;
+    add_sections(sec, head_end, offset, offset, offset);
+    check_wire_size(offset);
     return offset;
   }
 
-  // Deserialization function
-  /*
-    Construct QueryMsg from given pointer.
-  */
-  // TODO: now only tranfer the END query, so can concise.
-  void deserialize_and_merge(const void* src) {
-    size_t offset = 0;
-    memcpy(&ef, static_cast<const char*>(src) + offset, sizeof(ef));
-    offset += sizeof(ef);
-    memcpy(&query_id, static_cast<const char*>(src) + offset, sizeof(query_id));
-    offset += sizeof(query_id);
+  /**
+   * Apply a QUERY payload to this (pre-allocated) query. local_id is the
+   * receiving machine; machine_of maps a global id to the machine that
+   * holds it, the same range lookup the issuer used to split its seeds.
+   */
+  template <typename MachineOf>
+  void deserialize_and_merge(
+      const void* src, uint32_t local_id, MachineOf&& machine_of) {
+    const char* p = static_cast<const char*>(src);
+    uint8_t kind;
+    wire::get(p, kind);
+    uint32_t qid;
+    wire::get(p, qid);
+    query_id = qid;
 
-    memcpy(
-        &origin_machine, static_cast<const char*>(src) + offset,
-        sizeof(origin_machine));
-    offset += sizeof(origin_machine);
-    memcpy(
-        &current_node_id, static_cast<const char*>(src) + offset,
-        sizeof(current_node_id));
-    offset += sizeof(current_node_id);
+    if (kind == QW_END) {
+      state = END;
+      uint32_t n_res;
+      wire::get(p, n_res);
+      while (!result.empty()) {
+        result.pop();
+      }
+      for (uint32_t i = 0; i < n_res; ++i) {
+        dist_t dist;
+        uint64_t label;
+        wire::get(p, dist);
+        wire::get(p, label);
+        result.emplace(dist, label);
+      }
+#ifdef DEBUG
+      memcpy(tmp_m_cnt, p, sizeof(tmp_m_cnt));
+#endif
+      return;
+    }
+    if (kind != QW_FORK) {
+      printf("Error: unknown QUERY wire kind %u\n", kind);
+      abort();
+    }
 
-    memcpy(
-        &lowerBound, static_cast<const char*>(src) + offset,
-        sizeof(lowerBound));
-    offset += sizeof(lowerBound);
-    memcpy(
-        &vector_size, static_cast<const char*>(src) + offset,
-        sizeof(vector_size));
-    offset += sizeof(vector_size);
-    if(vector == nullptr) vector = (char*)malloc(vector_size);
-    memcpy(
-        vector, static_cast<const char*>(src) + offset,
-        vector_size);
-    offset += vector_size;
-    memcpy(&state, static_cast<const char*>(src) + offset, sizeof(state));
-    offset += sizeof(state);
-
-    // Path count, for migration ref.
-    memcpy(path_cnt, static_cast<const char*>(src) + offset, sizeof(path_cnt));
-    offset += sizeof(path_cnt);
-
-    memcpy(
-        &max_path_id, static_cast<const char*>(src) + offset,
-        sizeof(max_path_id));
-    offset += sizeof(max_path_id);
-
-    memcpy(
-        &max_path_cnt, static_cast<const char*>(src) + offset,
-        sizeof(max_path_cnt));
-    offset += sizeof(max_path_cnt);
-
-    memcpy(
-        &path_length, static_cast<const char*>(src) + offset,
-        sizeof(path_length));
-    offset += sizeof(path_length);
-
-    // leader machine id
-    memcpy(
-        &leader_machine, static_cast<const char*>(src) + offset,
-        sizeof(leader_machine));
-    offset += sizeof(leader_machine);
-    // core machines
-    size_t core_machine_size;
-    memcpy(
-        &core_machine_size, static_cast<const char*>(src) + offset,
-        sizeof(core_machine_size));
-    offset += sizeof(core_machine_size);
-    for (size_t i = 0; i < core_machine_size; ++i) {
-      uint32_t m;
-      memcpy(&m, static_cast<const char*>(src) + offset, sizeof(m));
-      offset += sizeof(m);
+    state = PRE_STAGE;
+    uint32_t ef32;
+    wire::get(p, ef32);
+    ef = ef32;
+    uint8_t origin8, leader8, ncore;
+    wire::get(p, origin8);
+    wire::get(p, leader8);
+    wire::get(p, ncore);
+    origin_machine = origin8;
+    leader_machine = leader8;
+    core_machine.clear();
+    memset(is_core_machine, 0, sizeof(is_core_machine));
+    for (uint32_t i = 0; i < ncore; ++i) {
+      uint8_t m;
+      wire::get(p, m);
       core_machine.emplace_back(m);
       is_core_machine[m] = 1;
     }
+    wire::get(p, lowerBound);
+    uint32_t vsize;
+    wire::get(p, vsize);
+    vector_size = vsize;
+    if (vector == nullptr) vector = (char*)malloc(vector_size);
+    memcpy(vector, p, vector_size);
+    p += vector_size;
 
-    // printf("start deserialize top\n");
-
-    // #ifdef PROFILER
-    //     profiler.deserialize(static_cast<const char*>(src), offset);
-    // #endif
-
-    // Deserialize top_candidates
-    size_t top_candidates_size;
-    memcpy(
-        &top_candidates_size, static_cast<const char*>(src) + offset,
-        sizeof(top_candidates_size));
-    offset += sizeof(top_candidates_size);
+    // The issuer gave each core machine the top entries that live on it,
+    // and the leader also every entry that lives on a non-core machine.
+    // Rebuild that seed set from the top list instead of carrying it.
+    uint32_t n_top;
+    wire::get(p, n_top);
     while (!top_candidates.empty()) {
       top_candidates.pop();
     }
-    for (size_t i = 0; i < top_candidates_size; ++i) {
-      std::pair<dist_t, uint32_t> elem;
-      memcpy(&elem, static_cast<const char*>(src) + offset, sizeof(elem));
-      offset += sizeof(elem);
-      top_candidates.push(elem);
-    }
-
-    // printf("start candidate_set_size\n");
-    // Deserialize candidate_set
-    size_t candidate_set_size;
-    memcpy(
-        &candidate_set_size, static_cast<const char*>(src) + offset,
-        sizeof(candidate_set_size));
-    offset += sizeof(candidate_set_size);
     while (!candidate_set.empty()) {
       candidate_set.pop();
     }
-
-    // printf("candidate_set_size %u\n", candidate_set_size);
-
-    for (size_t i = 0; i < candidate_set_size; ++i) {
+    const bool is_leader = (leader_machine == local_id);
+    for (uint32_t i = 0; i < n_top; ++i) {
       std::pair<dist_t, uint32_t> elem;
-      memcpy(&elem, static_cast<const char*>(src) + offset, sizeof(elem));
-      offset += sizeof(elem);
-      candidate_set.push(elem);
-      visit_hash.CheckAndSet(elem.second);
+      wire::get(p, elem);
+      top_candidates.push(elem);
+      uint32_t mid = machine_of(elem.second);
+      if (mid == local_id || (is_leader && !is_core_machine[mid])) {
+        candidate_set.emplace(-elem.first, elem.second);
+        visit_hash.CheckAndSet(elem.second);
+      }
     }
-
-    // printf("start result_size\n");
-
-    // TODO: this can concise maybe.
-    // Deserialize result
-    size_t result_size;
-    memcpy(
-        &result_size, static_cast<const char*>(src) + offset,
-        sizeof(result_size));
-    offset += sizeof(result_size);
-    while (!result.empty()) {
-      result.pop();
-    }
-    for (size_t i = 0; i < result_size; ++i) {
-      std::pair<dist_t, size_t> elem;
-      memcpy(&elem, static_cast<const char*>(src) + offset, sizeof(elem));
-      offset += sizeof(elem);
-      result.push(elem);
-    }
-
-#ifdef DEBUG
-    memcpy(
-        tmp_m_cnt, static_cast<const char*>(src) + offset, sizeof(tmp_m_cnt));
-    offset += sizeof(tmp_m_cnt);
-#endif
-
-    // printf("offset: %d\n", offset);
-
-    return;
   }
 
   // Serialization function

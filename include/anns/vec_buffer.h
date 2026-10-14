@@ -2,10 +2,37 @@
 #include <stdlib.h>
 
 #include <cassert>
+#include <cstdio>
+#include <cstring>
 #include <deque>
 
 #include "../rdma/rdma_param.h"
 #include "anns/anns_param.h"
+
+// Fixed-width field helpers for the scala_v3 wire formats. put/get advance
+// the cursor; put_count narrows a list length to 16 bits and aborts rather
+// than wrap, since a list that long would already overflow the buffer.
+namespace wire {
+template <typename T>
+inline void put(char*& p, const T& v) {
+  memcpy(p, &v, sizeof(T));
+  p += sizeof(T);
+}
+template <typename T>
+inline void get(const char*& p, T& v) {
+  memcpy(&v, p, sizeof(T));
+  p += sizeof(T);
+}
+inline void put_count(char*& p, size_t n, const char* what) {
+  if (n > 0xffff) {
+    printf("Error: %s has %zu entries, wire count is 16-bit\n", what, n);
+    abort();
+  }
+  put<uint16_t>(p, n);
+}
+}  // namespace wire
+
+static_assert(MACHINE_NUM <= 255, "machine ids travel as one byte");
 
 template <typename dist_t>
 struct SyncMsg {
@@ -39,91 +66,67 @@ struct SyncMsg {
     }
   }
 
-  SyncMsg(char* ptr) {
-    size_t offset = 0;
-    memcpy(&qid, static_cast<const char*>(ptr) + offset, sizeof(qid));
-    offset += sizeof(qid);
+  /**
+   * Wire layout, written by serialize for one receiver:
+   *   qid u32, flags u8 (bit0 update_term, bit1 has_token,
+   *   bit2 token_is_black),
+   *   n_cand u16, (dist, id) pairs,
+   *   n_micro u16, n_large u16, micro ids u32[],
+   *   large entries (offset u64, deg u8).
+   * Only the receiver's own neighbor lists travel; update_sub_query reads
+   * core_micro_ngh[local_id] and core_large_ngh[local_id], so the lists
+   * land there. proc_is_black, last_is_white and lower_bound are sender
+   * state and are not sent.
+   */
+  SyncMsg(const char* ptr, uint32_t local_id) {
+    const char* p = ptr;
+    wire::get(p, qid);
+    uint8_t flags;
+    wire::get(p, flags);
+    update_term = flags & 1;
+    has_token = (flags >> 1) & 1;
+    token_is_black = (flags >> 2) & 1;
 
-    memcpy(
-        &update_term, static_cast<const char*>(ptr) + offset,
-        sizeof(update_term));
-    offset += sizeof(update_term);
-
-    memcpy(
-        &has_token, static_cast<const char*>(ptr) + offset, sizeof(has_token));
-    offset += sizeof(has_token);
-    memcpy(
-        &token_is_black, static_cast<const char*>(ptr) + offset,
-        sizeof(token_is_black));
-    offset += sizeof(token_is_black);
-
-    // printf(
-    //     "]] recv sync qid %u update_term %u token_is_black %u\n", qid,
-    //     update_term, token_is_black);
-    memcpy(
-        &proc_is_black, static_cast<const char*>(ptr) + offset,
-        sizeof(proc_is_black));
-    offset += sizeof(proc_is_black);
-    memcpy(
-        &last_is_white, static_cast<const char*>(ptr) + offset,
-        sizeof(last_is_white));
-    offset += sizeof(last_is_white);
-    memcpy(
-        &lower_bound, static_cast<const char*>(ptr) + offset,
-        sizeof(lower_bound));
-    offset += sizeof(lower_bound);
-    uint32_t size;
-    memcpy(&size, static_cast<const char*>(ptr) + offset, sizeof(size));
-    offset += sizeof(size);
-    for (uint32_t i = 0; i < size; i++) {
+    uint16_t n_cand;
+    wire::get(p, n_cand);
+    local_add_cand.reserve(n_cand);
+    for (uint32_t i = 0; i < n_cand; i++) {
       std::pair<dist_t, uint32_t> elem;
-      memcpy(&elem, static_cast<const char*>(ptr) + offset, sizeof(elem));
-      offset += sizeof(elem);
+      wire::get(p, elem);
       local_add_cand.emplace_back(elem);
     }
-    for (uint32_t i = 0; i < MACHINE_NUM; i++) {
-      uint32_t size2;
-      memcpy(&size2, static_cast<const char*>(ptr) + offset, sizeof(size2));
-      offset += sizeof(size2);
-      uint32_t size3;
-      memcpy(&size3, static_cast<const char*>(ptr) + offset, sizeof(size3));
-      offset += sizeof(size3);
-      for (uint32_t j = 0; j < size2; j++) {
-        uint32_t elem;
-        memcpy(&elem, static_cast<const char*>(ptr) + offset, sizeof(elem));
-        offset += sizeof(elem);
-        core_micro_ngh[i].emplace_back(elem);
-      }
-      for (uint32_t j = 0; j < size3; j++) {
-        std::pair<size_t, uint32_t> elem;
-        memcpy(&elem, static_cast<const char*>(ptr) + offset, sizeof(elem));
-        offset += sizeof(elem);
-        core_large_ngh[i].emplace_back(elem);
-      }
+
+    uint16_t n_micro, n_large;
+    wire::get(p, n_micro);
+    wire::get(p, n_large);
+    auto& micro = core_micro_ngh[local_id];
+    micro.reserve(n_micro);
+    for (uint32_t i = 0; i < n_micro; i++) {
+      uint32_t id;
+      wire::get(p, id);
+      micro.emplace_back(id);
+    }
+    auto& large = core_large_ngh[local_id];
+    large.reserve(n_large);
+    for (uint32_t i = 0; i < n_large; i++) {
+      uint64_t ofs;
+      uint8_t deg;
+      wire::get(p, ofs);
+      wire::get(p, deg);
+      large.emplace_back(ofs, deg);
     }
   }
 
-  // target is the receiving machine; sec, when given, accumulates bytes by
-  // section: header, local_add_cand, target's neighbor lists, every other
-  // machine's neighbor lists. The receiver reads only its own lists.
-  size_t serialize(
-      char* ptr, uint32_t target = MACHINE_NUM, uint64_t* sec = nullptr) {
-    size_t offset = 0;
-    memcpy(ptr + offset, &qid, sizeof(qid));
-    offset += sizeof(qid);
-    memcpy(ptr + offset, &update_term, sizeof(update_term));
-    offset += sizeof(update_term);
-    memcpy(ptr + offset, &has_token, sizeof(has_token));
-    offset += sizeof(has_token);
-    memcpy(ptr + offset, &token_is_black, sizeof(token_is_black));
-    offset += sizeof(token_is_black);
-    memcpy(ptr + offset, &proc_is_black, sizeof(proc_is_black));
-    offset += sizeof(proc_is_black);
-    memcpy(ptr + offset, &last_is_white, sizeof(last_is_white));
-    offset += sizeof(last_is_white);
-    memcpy(ptr + offset, &lower_bound, sizeof(lower_bound));
-    offset += sizeof(lower_bound);
-    size_t head_end = offset;
+  // target is the receiving machine. sec, when given, accumulates bytes by
+  // section: header, local_add_cand with its count, the target's neighbor
+  // lists with their counts.
+  size_t serialize(char* ptr, uint32_t target, uint64_t* sec = nullptr) {
+    char* p = ptr;
+    wire::put(p, qid);
+    uint8_t flags = (update_term ? 1 : 0) | (has_token ? 2 : 0) |
+                    (token_is_black ? 4 : 0);
+    wire::put(p, flags);
+    size_t head_end = p - ptr;
 
     std::vector<std::pair<dist_t, uint32_t>> filterred_local_cand;
     for (std::pair<dist_t, uint32_t>& elem : local_add_cand) {
@@ -133,44 +136,34 @@ struct SyncMsg {
       }
       filterred_local_cand.emplace_back(elem);
     }
-    uint32_t size = filterred_local_cand.size();
-    memcpy(ptr + offset, &size, sizeof(size));
-    offset += sizeof(size);
+    wire::put_count(p, filterred_local_cand.size(), "sync local_add_cand");
     for (std::pair<dist_t, uint32_t>& elem : filterred_local_cand) {
-      memcpy(ptr + offset, &elem, sizeof(elem));
-      offset += sizeof(elem);
+      wire::put(p, elem);
     }
-    size_t cand_end = offset;
-    size_t target_bytes = 0;
-    // TODO: serialize only target machine.
-    for (uint32_t i = 0; i < MACHINE_NUM; i++) {
-      size_t list_begin = offset;
-      uint32_t size2 = core_micro_ngh[i].size();
-      memcpy(ptr + offset, &size2, sizeof(size2));
-      offset += sizeof(size2);
-      uint32_t size3 = core_large_ngh[i].size();
-      memcpy(ptr + offset, &size3, sizeof(size3));
-      offset += sizeof(size3);
+    size_t cand_end = p - ptr;
 
-      for (uint32_t& elem : core_micro_ngh[i]) {
-        memcpy(ptr + offset, &elem, sizeof(elem));
-        offset += sizeof(elem);
-      }
-      for (std::pair<size_t, uint32_t>& elem : core_large_ngh[i]) {
-        memcpy(ptr + offset, &elem, sizeof(elem));
-        offset += sizeof(elem);
-        // printf("emplace-sync %llu %u\n", elem.first, elem.second);
-      }
-      if (i == target) target_bytes = offset - list_begin;
-      // printf(
-      //     "send to q%u sync task size %u, %u, ofs %llu\n", qid, size2, size3,
-      //     offset);
+    auto& micro = core_micro_ngh[target];
+    auto& large = core_large_ngh[target];
+    wire::put_count(p, micro.size(), "sync core_micro_ngh");
+    wire::put_count(p, large.size(), "sync core_large_ngh");
+    for (uint32_t& elem : micro) {
+      wire::put(p, elem);
     }
+    for (std::pair<size_t, uint32_t>& elem : large) {
+      // The v3 neighbor format stores a degree in one byte (ptr[0]).
+      if (elem.second > 0xff) {
+        printf(
+            "Error: sync neighbor degree %u exceeds one byte\n", elem.second);
+        abort();
+      }
+      wire::put<uint64_t>(p, elem.first);
+      wire::put<uint8_t>(p, elem.second);
+    }
+    size_t offset = p - ptr;
     if (sec != nullptr) {
       sec[0] += head_end;
       sec[1] += cand_end - head_end;
-      sec[2] += target_bytes;
-      sec[3] += offset - cand_end - target_bytes;
+      sec[2] += offset - cand_end;
     }
     if (offset >= MAX_QUERYBUFFER_SIZE) {
       printf("Error: sync msg exceed buffer size\n");

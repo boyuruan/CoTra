@@ -48,8 +48,10 @@ class RdmaContext {
   // QUERY bytes by section; index 0 is fork, 1 is migrate.
   uint64_t query_cnt[2], query_head[2], query_top[2], query_cand[2];
   uint64_t query_result[2];
-  // SYNC bytes by section, and how many carried the termination token.
-  uint64_t sync_cnt, sync_head, sync_cand, sync_target, sync_other, sync_token;
+  // SYNC bytes by section (header, local_add_cand, the target's lists), how
+  // many carried the termination token, and the neighbor entries sent.
+  uint64_t sync_cnt, sync_head, sync_cand, sync_target, sync_token;
+  uint64_t sync_micro, sync_large;
   // Nodes expanded here, node tasks sent, exact and PQ distances computed.
   uint64_t work_expand, work_node_task, work_dist, work_pq_dist;
 
@@ -132,8 +134,8 @@ class RdmaContext {
     memset(query_top, 0, sizeof(query_top));
     memset(query_cand, 0, sizeof(query_cand));
     memset(query_result, 0, sizeof(query_result));
-    sync_cnt = sync_head = sync_cand = sync_target = sync_other = 0;
-    sync_token = 0;
+    sync_cnt = sync_head = sync_cand = sync_target = sync_token = 0;
+    sync_micro = sync_large = 0;
     work_expand = work_node_task = work_dist = work_pq_dist = 0;
   }
 

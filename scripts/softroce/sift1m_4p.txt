@@ -244,3 +244,118 @@ Recall differs from base by at most 0.00023 per ef, except ef 50 at
 -0.00053 (shadow against base reached 0.00048). RESULT posts are unchanged:
 every task still answers so the issuer can count completions. At recall
 0.95, WRITE is 55.57 MB against 56.93 MB (-2.4%); READ is unchanged.
+
+Where QUERY and SYNC bytes go, same index and flags, no PQ, 2026-10-14.
+Counters only (commit 1e28e53): QUERY bytes by purpose and section, SYNC
+bytes by section, and per-machine work. Two baseline runs give the
+run-to-run spread; a third run adds PQ32 tau 0 to see whether the gate
+saves compute as well as traffic.
+Logs: tmp/sift1m-4p/logs/{sec-base1,sec-base2,sec-pq32}/
+Tables: python3 scripts/softroce/comm_table.py <log dir> 4 --types --chan --sections
+
+ef 100, base1, summed over machines. WRITE 34.49 MB.
+QUERY 18.91 MB / 16953 posts: 9424 forks to core machines carrying
+header 2.09 MB (72 B + vector + 4 B per machine + 4 B per core), top list
+7.61 MB (16 B per entry), candidate section 6.09 MB (16 B per entry; the
+receiver's seeds, a subset of the top list), empty result 0.08 MB; 7529
+migrates back to the issuer carrying 3.05 MB, of which 1.66 MB is the
+header and 1.26 MB the 10 results at 16 B each.
+SYNC 10.81 MB / 42245 posts: header 0.55 MB (13 B), local_add_cand
+5.18 MB, the receiver's own neighbor lists 4.07 MB (4 B per inline id,
+16 B per out-of-line (offset, degree) pair), the other machines' lists
+1.01 MB, all of it empty-list size fields (24 B per message at 4P), token
+17 KB.
+Work: 1195335 nodes expanded, 18890 node tasks, 19769872 exact distances.
+base2 against base1 at ef 100: recall 0.91376 vs 0.91377, WRITE 34.45 vs
+34.49 MB, READ identical, SYNC 42091 vs 42245 posts, expansions 1194001
+vs 1195335, node tasks 18881 vs 18890, exact distances 19761804 vs
+19769872. Fork and migrate section bytes are identical across runs: the
+pre-stage is deterministic.
+PQ32 tau 0 at ef 100: recall 0.91345, READ 2.42 MB / 17764 posts, WRITE
+33.98 MB, expansions 1195163 (same), node tasks 18396 (-2.6%), exact
+distances 19616516 (-0.8%), plus 283131 PQ distances. The gate drops
+85780 READs and 112425 inline ids sent to core machines. It is a traffic
+saving, not a compute saving: the gated neighbors would mostly have been
+rejected after their exact distance anyway.
+
+Encoding change, same index and flags, no PQ, 2026-10-14.
+Each scala_v3 message now carries only what its receiver reads
+(QueryMsg::fork, QueryMsg::serialize_end, SyncMsg::serialize). A QUERY
+payload starts with a kind byte. Fork: kind, qid, ef, origin, leader,
+core list, lowerBound, vector, top list (8 B per entry); no candidate
+section, the receiver derives its seeds from the top list by the issuer's
+split rule (entries on the receiver, plus entries on non-core machines
+when the receiver is the leader). END: kind, qid, result (12 B per
+entry). SYNC: qid, flag bits, local_add_cand (8 B per entry), then only
+the receiver's lists: inline ids at 4 B, out-of-line entries as 8 B
+offset + 1 B degree. Fixed bytes per SYNC fall from 13 + 4 + 8 + 24 to
+5 + 2 + 4. The receiver dispatches on is_new, never on a wire state.
+Logs: tmp/sift1m-4p/logs/enc-run1/ against sec-base1 and sec-base2.
+
+Predicted from the base1 counters against measured: fork header, fork top
+list, migrate total, SYNC header and SYNC target bytes match at every ef
+to the byte (the pre-stage is deterministic); SYNC local_add_cand is
+within 0.9%; total WRITE within 0.24%. READ bytes and posts, fork and
+migrate counts, TASK, RESULT, NODE_RESULT, NODE_SYNC and RELEASE bytes
+are unchanged. Expansions, node tasks and exact distances are within
+0.25% of the nearer baseline at every ef, SYNC posts within 0.6%,
+accepted entries per channel within 1.5%. Recall differs from the nearer
+baseline by at most 0.00043 (ef 20). The band between the two baselines
+is 0.00001 wide at ef 100 and 0.00131 at ef 10; 10 of the 16 rows fall
+outside it, by at most 0.00029 (ef 40), under the 0.00053 same-code
+spread recorded above. Read that as noise, not as a shift.
+
+ef	base1_recall	base2_recall	new_recall	base1_write_B	base2_write_B	new_write_B	base1_read_B	new_read_B
+10	0.60182	0.60313	0.60340	9485549	9489830	5236865	3639088	3645072
+15	0.66804	0.66797	0.66824	10941589	10945287	6132745	4099720	4105704
+20	0.71354	0.71445	0.71402	12225413	12228612	7168985	5265240	5276120
+30	0.77309	0.77354	0.77361	14996988	14978699	8964309	6101912	6099056
+40	0.81368	0.81381	0.81339	17696089	17696823	10889413	7543784	7544600
+50	0.84181	0.84153	0.84171	20495354	20485981	12771229	8436216	8437848
+70	0.87959	0.87950	0.87939	26033519	26011208	16618334	10637376	10641728
+100	0.91377	0.91376	0.91372	34487457	34451243	22576931	14081984	14082392
+150	0.94301	0.94267	0.94288	48828512	48806786	32620893	18829336	18832328
+200	0.95837	0.95852	0.95840	63372718	63345220	42768557	23741384	23738664
+250	0.96787	0.96796	0.96781	78238281	78275929	53288140	28059248	28065096
+300	0.97429	0.97399	0.97413	93155834	93535365	63912777	32504544	32499512
+400	0.98170	0.98173	0.98176	123544620	123918799	85174955	40135096	40129112
+500	0.98548	0.98568	0.98571	154351503	154426287	106906100	46768904	46771352
+600	0.98852	0.98876	0.98855	185654700	185480366	129198683	53439976	53466360
+700	0.99057	0.99051	0.99040	218182618	217254532	151789238	58797152	58778520
+
+Bytes per message type, base1 against new. Fork and migrate counts are
+the same in both; SYNC counts differ by the run-to-run spread. micro and
+large are the inline ids and out-of-line entries the new SYNCs carried.
+ef	fork_cnt	old_fork_B	new_fork_B	old_migrate_B	new_migrate_B	old_sync_cnt	new_sync_cnt	old_sync_B	new_sync_B	micro	large
+10	8908	3499144	2078332	3038704	968532	15579	15634	1516911	759163	22924	24061
+50	9289	9002928	5140370	3049296	971370	28745	28728	5517597	3736525	91629	97633
+100	9424	15864380	8984907	3049476	971241	42245	42175	10813473	7860224	178626	187115
+200	9667	29852216	16950588	3042352	968661	73603	73407	23022943	17393179	379889	390050
+300	9852	44089296	25156848	3043032	968661	107613	107886	36100693	27862003	598999	610949
+500	10130	73067740	42075125	3052660	971370	182989	183407	64991689	50616097	1073131	1071848
+700	10347	102574992	59531954	3049832	970209	265468	265143	96641960	75372345	1568235	1564376
+At ef 100 the new fork is 1.41 MB header + 7.58 MB top list; the migrate
+is 0.04 MB header + 0.93 MB result; the SYNC is 0.21 MB header + 5.08 MB
+local_add_cand + 2.57 MB target lists.
+
+Total READ+WRITE and WRITE at the same recall, linear in recall between
+ef rows. Posts are within 0.2% (198.4K, 310.2K, 556.8K in base1).
+recall	base1_MB	base2_MB	new_MB	base1_write_MB	base2_write_MB	new_write_MB
+0.90	43.78	43.76	32.90 (-24.8%)	31.08	31.06	20.20 (-35.0%)
+0.95	76.51	76.63	58.36 (-23.7%)	55.45	55.53	37.28 (-32.8%)
+0.98	154.96	155.55	118.64 (-23.4%)	116.57	117.13	80.27 (-31.1%)
+What is left at ef 100 (22.58 MB WRITE): fork top lists 7.58 MB, SYNC
+local_add_cand 5.08 MB, SYNC target lists 2.57 MB, TASK 2.07 MB, fork
+headers 1.41 MB (of which 1.21 MB is the 128 B query vector, kept because
+every machine holding every query is a benchmark artifact). Those are
+entries the receivers use; shrinking them further means sending fewer
+entries, not packing them tighter.
+
+With the PQ gate as well (PQ32 tau 0, logs tmp/sift1m-4p/logs/enc-pq32/):
+the gate takes the READs and the encoding takes the WRITE bytes, and the
+two compose. ef 100: recall 0.91355, READ 2.42 MB / 17787, WRITE
+22.08 MB / 112k, expansions 1194123, exact distances 19609857.
+recall	base1_MB	pq32_MB	enc_MB	enc_pq32_MB	base1_ops	enc_pq32_ops
+0.90	43.78	32.88 (-24.9%)	32.90 (-24.8%)	21.91 (-49.9%)	198.4K	120.4K (-39.3%)
+0.95	76.51	58.27 (-23.8%)	58.36 (-23.7%)	40.04 (-47.7%)	310.2K	181.5K (-41.5%)
+0.98	154.96	121.94 (-21.3%)	118.64 (-23.4%)	85.50 (-44.8%)	556.8K	323.7K (-41.9%)
