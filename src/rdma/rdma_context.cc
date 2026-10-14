@@ -148,8 +148,7 @@ void RdmaContext::create_main_partition_mr(
   flags |= IBV_ACCESS_REMOTE_WRITE;
   flags |= IBV_ACCESS_REMOTE_READ;
   for_read_ptr[0] = vec_part_ptr;
-  for_read_mr[0] =
-      ibv_reg_mr(pd, for_read_ptr[0], INC(part_length, cacheline), flags);
+  for_read_mr[0] = ibv_reg_mr(pd, for_read_ptr[0], part_length, flags);
   if (!for_read_mr[0]) {
     printf(
         "Failed to create main mr. length: %llu align length: %llu errno %d "
