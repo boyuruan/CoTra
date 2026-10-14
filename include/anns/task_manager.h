@@ -377,6 +377,26 @@ class TaskManager {
     return;
   }
 
+  bool can_apply_node_sync(const char* ptr) const {
+    uint64_t offset = sizeof(uint32_t);
+    uint32_t size = 0;
+    memcpy(&size, ptr + offset, sizeof(size));
+    offset += sizeof(size);
+    for (uint32_t i = 0; i < size; i++) {
+      NonCoreSyncMsg<dist_t> sync_msg(const_cast<char*>(ptr), offset);
+      if (global_query[sync_msg.qid]->is_new) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool can_apply_sync(const char* ptr) const {
+    uint32_t qid = 0;
+    memcpy(&qid, ptr, sizeof(qid));
+    return !global_query[qid]->is_new;
+  }
+
   /**
    * recv new sync : update sub-query.
    * TODO: may mv to scala search
