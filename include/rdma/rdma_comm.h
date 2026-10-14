@@ -40,7 +40,13 @@ class RdmaCommunication {
   size_t all_computation_cnt{0};
 
   RdmaCommunication() {}
-  ~RdmaCommunication() {}
+  ~RdmaCommunication();
+
+  void *shm_peer_base[MACHINE_NUM]{nullptr};
+  size_t shm_peer_size[MACHINE_NUM]{0};
+  std::string shm_my_path;
+  void com_init_shm(char *vec_part_ptr, size_t vec_part_len);
+  void shm_cleanup();
 
   // Indicator for termination.
   bool term[MACHINE_NUM];

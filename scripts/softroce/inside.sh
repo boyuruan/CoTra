@@ -8,6 +8,7 @@ CONF=/src/scripts/softroce/ip_local.conf
 PORT=21211
 BUILD=/tmp/cotra-build
 BIN="${BUILD}/tests/rdma/test_read"
+IB_DEV=${IB_DEV:-rxe0}
 
 setup_memcached() {
   if [[ -f /tmp/memcached.pid ]]; then
@@ -58,15 +59,17 @@ link_rxe() {
 
 run_pair() {
   local log=/tmp/test_read.log
-  setup_memcached
+  if [[ "${IB_DEV}" != shm* ]]; then
+    setup_memcached
+  fi
   # 2560 * 200000 = 512MB. A 2.5GB registration is rejected by rxe here.
   # timeout: a lost READ completion otherwise spins in poll_read.
-  stdbuf -oL -eL "${BIN}" -m 1 -t 1 -n 200000 -d rxe0 --config_file "${CONF}" \
+  stdbuf -oL -eL "${BIN}" -m 1 -t 1 -n 200000 -d "${IB_DEV}" --config_file "${CONF}" \
     >/tmp/follower.log 2>&1 &
   local follower=$!
   set +e
   stdbuf -oL -eL timeout --foreground 120 \
-    "${BIN}" -m 0 -t 1 -n 200000 -d rxe0 --config_file "${CONF}" >"${log}" 2>&1
+    "${BIN}" -m 0 -t 1 -n 200000 -d "${IB_DEV}" --config_file "${CONF}" >"${log}" 2>&1
   local status=$?
   set -e
   kill "${follower}" 2>/dev/null || true
@@ -81,10 +84,21 @@ run_pair() {
   grep -q 'read-268-B' "${log}"
 }
 
-modprobe rdma_rxe
+if [[ "${IB_DEV}" != shm* ]]; then
+  modprobe rdma_rxe
+fi
 g++ --version | head -n 1
 cmake -S /src -B "${BUILD}" -DCOTRA_WITH_INDEX=OFF -DMACHINE_NUM=2
 cmake --build "${BUILD}" -j "$(nproc)" --target test_read
+
+if [[ "${IB_DEV}" == shm* ]]; then
+  if run_pair; then
+    echo "shm test_read passed"
+    exit 0
+  fi
+  echo "shm test_read failed"
+  exit 1
+fi
 
 if link_rxe lo && run_pair; then
   echo "soft-roce test_read passed on lo"

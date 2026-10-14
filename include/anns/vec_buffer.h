@@ -741,17 +741,20 @@ struct RecvWriteBuffer {
   std::deque<char*> recv_compute;
   char* buffer[MACHINE_NUM][MAX_WRITE_NUM];
 
-  void init() {
+  void init(char* external_buf = nullptr) {
     for (int i = 0; i < MACHINE_NUM; i++) {
       release_id_list[i] = new std::deque<uint32_t>();
     }
 
-    char* buf_ptr = static_cast<char*>(
-        malloc(MACHINE_NUM * MAX_WRITE_NUM * MAX_QUERYBUFFER_SIZE));
+    char* buf_ptr = external_buf;
+    if (buf_ptr == nullptr) {
+      buf_ptr = static_cast<char*>(
+          malloc(MACHINE_NUM * MAX_WRITE_NUM * MAX_QUERYBUFFER_SIZE));
 
-    std::fill(
-        buf_ptr, buf_ptr + MACHINE_NUM * MAX_WRITE_NUM * MAX_QUERYBUFFER_SIZE,
-        0);
+      std::fill(
+          buf_ptr, buf_ptr + MACHINE_NUM * MAX_WRITE_NUM * MAX_QUERYBUFFER_SIZE,
+          0);
+    }
     for (int i = 0; i < MACHINE_NUM; i++) {
       for (int j = 0; j < MAX_WRITE_NUM; j++) {
         buffer[i][j] = buf_ptr + (i * MAX_WRITE_NUM + j) * MAX_QUERYBUFFER_SIZE;

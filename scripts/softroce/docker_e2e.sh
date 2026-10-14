@@ -14,13 +14,13 @@ docker build -t cotra-softroce \
   -f "${ROOT}/scripts/softroce/Dockerfile" \
   "${ROOT}/scripts/softroce"
 
-run=(docker run --rm --privileged --network host --ulimit memlock=-1:-1)
+run=(docker run --rm --privileged --network host --ipc=host --ulimit memlock=-1:-1)
 run+=(-e "MACHINE_NUM=${MACHINE_NUM:-2}")
 run+=(-v /lib/modules:/lib/modules:ro)
 run+=(-v "${ROOT}":/src:ro)
 
 for name in SAMPLE_PERCENT SEARCH_TIMEOUT INDEX_TIMEOUT SINGLE_TIMEOUT DATA_DIR \
-  SKIP_INDEX SKIP_SINGLE SEARCH_ARGS BUILD_DIR PQ_CHUNKS PQ_TAU; do
+  SKIP_INDEX SKIP_SINGLE SEARCH_ARGS BUILD_DIR PQ_CHUNKS PQ_TAU IB_DEV; do
   if [[ -n "${!name:-}" ]]; then
     run+=(-e "${name}=${!name}")
   fi

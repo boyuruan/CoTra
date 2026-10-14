@@ -121,11 +121,16 @@ against 1.0. At 4P, `scala_v3` sits below `single` through the middle of the
 ef sweep and the two meet from ef 150. At 2P, `scala_v3` was at least
 `single` at every ef. Read a mid-ef gap on 4P against that shape.
 
-`e2e.sh` also runs experiments on an index that already exists:
-`SKIP_INDEX=1` searches the index in `WORKDIR`, `SKIP_SINGLE=1` skips
-`single` and the pass rule, `SEARCH_ARGS` is appended to the `scala_v3`
-command, and `BUILD_DIR` keeps a build across containers. `PQ_CHUNKS` and
-`PQ_TAU` turn on the PQ gate below. `docker_e2e.sh` passes these through.
+- `e2e.sh` also runs experiments on an index that already exists:
+  `SKIP_INDEX=1` searches the index in `WORKDIR`, `SKIP_SINGLE=1` skips
+  `single` and the pass rule, `SEARCH_ARGS` is appended to the `scala_v3`
+  command, and `BUILD_DIR` keeps a build across containers. `PQ_CHUNKS` and
+  `PQ_TAU` turn on the PQ gate below. `IB_DEV=shm` (or `-d shm[:tag]`) selects
+  the POSIX `/dev/shm` RDMA backend (`RdmaCommunication::com_init_shm` and
+  `RdmaContext`), which simulates one-sided READ and WRITE_WITH_IMM across
+  processes without `rdma_rxe` or `memcached` while keeping the upper
+  `RdmaCommunication` path and `COMM_PROFILE` counters unchanged.
+  `docker_e2e.sh` and `docker_test_read.sh` pass `IB_DEV` through.
 
 The PQ gate (`--pq_prefix`, `--pq_tau`, `include/anns/pq_codes.h`) keeps
 PQ codes of every base vector on every machine. `tests/index/pq_encode`

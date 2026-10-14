@@ -1,5 +1,47 @@
 #include "rdma/rdma_comm.h"
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+
+#include <chrono>
+
+static std::string shm_base_prefix(const RdmaParameter &param) {
+  if (strncmp(param.ib_devname, "shm:", 4) == 0 &&
+      param.ib_devname[4] != '\0') {
+    std::string tag(param.ib_devname + 4);
+    if (tag[0] == '/') return tag;
+    return "/dev/shm/" + tag;
+  }
+  struct statvfs vfs;
+  if (statvfs("/dev/shm", &vfs) == 0 &&
+      uint64_t(vfs.f_blocks) * vfs.f_frsize >= (512ULL << 20)) {
+    return "/dev/shm/cotra_shm";
+  }
+  return "/tmp/cotra_shm";
+}
+
+static std::string shm_peer_path(const std::string &prefix, int n, int m) {
+  return prefix + "_n" + std::to_string(n) + "_m" + std::to_string(m);
+}
+
+RdmaCommunication::~RdmaCommunication() { shm_cleanup(); }
+
+void RdmaCommunication::shm_cleanup() {
+  if (!shm_my_path.empty()) {
+    unlink(shm_my_path.c_str());
+    shm_my_path.clear();
+  }
+  for (int m = 0; m < MACHINE_NUM; m++) {
+    if (shm_peer_base[m] != nullptr) {
+      munmap(shm_peer_base[m], shm_peer_size[m]);
+      shm_peer_base[m] = nullptr;
+      shm_peer_size[m] = 0;
+    }
+  }
+}
+
 int RdmaCommunication::ethernet_leader_connect() {
   struct addrinfo *res, *t;
   struct addrinfo hints;
@@ -390,6 +432,10 @@ int RdmaCommunication::ctx_hand_shake(
 }
 
 int RdmaCommunication::ctx_close_connection() {
+  if (rdma_param.is_shm()) {
+    shm_cleanup();
+    return 0;
+  }
   /*Signal client is finished.*/
   for (int m = 0; m < rdma_param.machine_num; m++) {
     if (m == rdma_param.machine_id) continue;
@@ -413,12 +459,220 @@ int RdmaCommunication::ctx_close_connection() {
   return 0;
 }
 
+void RdmaCommunication::com_init_shm(
+    char *vec_part_ptr, size_t vec_part_len) {
+  int my_id = rdma_param.machine_id;
+  int n = rdma_param.machine_num;
+  int num_threads = getActiveThreads();
+  rdma_param.machine = (my_id == 0) ? LEADER : MEMBER;
+
+  size_t part_offset = ROUND_UP(sizeof(ShmSegmentHeader), 4096);
+  size_t part_alloc = ROUND_UP(vec_part_len > 0 ? vec_part_len : 4096, 4096);
+  size_t thread_region_offset = part_offset + part_alloc;
+  size_t total_bytes =
+      thread_region_offset + size_t(num_threads) * sizeof(ShmThreadRegion);
+
+  std::string prefix = shm_base_prefix(rdma_param);
+  shm_my_path = shm_peer_path(prefix, n, my_id);
+  unlink(shm_my_path.c_str());
+
+  int fd = open(shm_my_path.c_str(), O_CREAT | O_EXCL | O_RDWR, 0666);
+  if (fd < 0) {
+    perror("com_init_shm: open");
+    exit(1);
+  }
+  if (ftruncate(fd, total_bytes) != 0) {
+    perror("com_init_shm: ftruncate");
+    close(fd);
+    unlink(shm_my_path.c_str());
+    exit(1);
+  }
+  void *my_base =
+      mmap(nullptr, total_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  if (my_base == MAP_FAILED) {
+    perror("com_init_shm: mmap");
+    unlink(shm_my_path.c_str());
+    exit(1);
+  }
+
+  shm_peer_base[my_id] = my_base;
+  shm_peer_size[my_id] = total_bytes;
+
+  memset(my_base, 0, part_offset);
+  if (vec_part_ptr != nullptr && vec_part_len > 0) {
+    memcpy(static_cast<char *>(my_base) + part_offset, vec_part_ptr, vec_part_len);
+  }
+  memset(
+      static_cast<char *>(my_base) + thread_region_offset, 0,
+      size_t(num_threads) * sizeof(ShmThreadRegion));
+
+  auto *my_hdr = static_cast<ShmSegmentHeader *>(my_base);
+  my_hdr->machine_id = my_id;
+  my_hdr->machine_num = n;
+  my_hdr->thread_num = num_threads;
+  my_hdr->part_offset = part_offset;
+  my_hdr->part_len = vec_part_len;
+  my_hdr->thread_region_offset = thread_region_offset;
+  my_hdr->total_bytes = total_bytes;
+
+  uint64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+  uint64_t my_iid =
+      (uint64_t(getpid()) << 32) ^ (now_ns & 0xffffffffULL) ^
+      (uint64_t(my_id + 1) << 56);
+  if (my_iid == 0) my_iid = 1;
+
+  my_hdr->ack_from[my_id].store(my_iid, std::memory_order_relaxed);
+  my_hdr->ack_target[my_id].store(my_iid, std::memory_order_relaxed);
+  my_hdr->instance_id.store(my_iid, std::memory_order_release);
+  my_hdr->magic.store(COTRA_SHM_MAGIC, std::memory_order_release);
+
+  ino_t peer_ino[MACHINE_NUM] = {0};
+  for (;;) {
+    bool all_acked = true;
+    for (int m = 0; m < n; m++) {
+      if (m == my_id) continue;
+      std::string ppath = shm_peer_path(prefix, n, m);
+      struct stat st;
+      if (stat(ppath.c_str(), &st) != 0 ||
+          st.st_size < static_cast<off_t>(sizeof(ShmSegmentHeader))) {
+        all_acked = false;
+        continue;
+      }
+      if (shm_peer_base[m] != nullptr && peer_ino[m] != st.st_ino) {
+        munmap(shm_peer_base[m], shm_peer_size[m]);
+        shm_peer_base[m] = nullptr;
+        shm_peer_size[m] = 0;
+      }
+      if (shm_peer_base[m] == nullptr) {
+        int pfd = open(ppath.c_str(), O_RDWR);
+        if (pfd < 0) {
+          all_acked = false;
+          continue;
+        }
+        struct stat fst;
+        if (fstat(pfd, &fst) != 0 ||
+            fst.st_size < static_cast<off_t>(sizeof(ShmSegmentHeader))) {
+          close(pfd);
+          all_acked = false;
+          continue;
+        }
+        void *hdr_map = mmap(
+            nullptr, sizeof(ShmSegmentHeader), PROT_READ | PROT_WRITE,
+            MAP_SHARED, pfd, 0);
+        if (hdr_map == MAP_FAILED) {
+          close(pfd);
+          all_acked = false;
+          continue;
+        }
+        auto *phdr_probe = static_cast<ShmSegmentHeader *>(hdr_map);
+        uint64_t magic = phdr_probe->magic.load(std::memory_order_acquire);
+        uint64_t ptotal = phdr_probe->total_bytes;
+        munmap(hdr_map, sizeof(ShmSegmentHeader));
+        if (magic != COTRA_SHM_MAGIC ||
+            fst.st_size < static_cast<off_t>(ptotal)) {
+          close(pfd);
+          all_acked = false;
+          continue;
+        }
+        void *pmap =
+            mmap(nullptr, ptotal, PROT_READ | PROT_WRITE, MAP_SHARED, pfd, 0);
+        close(pfd);
+        if (pmap == MAP_FAILED) {
+          all_acked = false;
+          continue;
+        }
+        shm_peer_base[m] = pmap;
+        shm_peer_size[m] = ptotal;
+        peer_ino[m] = fst.st_ino;
+      }
+
+      auto *phdr = static_cast<ShmSegmentHeader *>(shm_peer_base[m]);
+      if (phdr->magic.load(std::memory_order_acquire) != COTRA_SHM_MAGIC) {
+        all_acked = false;
+        continue;
+      }
+      uint64_t peer_iid = phdr->instance_id.load(std::memory_order_acquire);
+      phdr->ack_from[my_id].store(my_iid, std::memory_order_release);
+      phdr->ack_target[my_id].store(peer_iid, std::memory_order_release);
+
+      if (my_hdr->ack_from[m].load(std::memory_order_acquire) != peer_iid ||
+          my_hdr->ack_target[m].load(std::memory_order_acquire) != my_iid) {
+        all_acked = false;
+      }
+    }
+    if (all_acked) break;
+    usleep(1000);
+  }
+
+  my_hdr->all_connected.store(1, std::memory_order_release);
+  for (int m = 0; m < n; m++) {
+    auto *phdr = static_cast<ShmSegmentHeader *>(shm_peer_base[m]);
+    while (phdr->all_connected.load(std::memory_order_acquire) == 0) {
+      usleep(500);
+    }
+  }
+  unlink(shm_my_path.c_str());
+  shm_my_path.clear();
+
+  on_each([&](uint64 tid, uint64 total) {
+    auto *local_buf = read_buf.getLocal();
+    auto *local_send_write = send_write_buf.getLocal();
+    auto *local_recv_write = recv_write_buf.getLocal();
+    auto *ctx = rdma_ctx.getLocal();
+
+    memset(ctx, 0, sizeof(RdmaContext));
+    ctx->is_shm_mode = true;
+    ctx->thread_id = tid;
+    ctx->machine_num = n;
+    ctx->machine_id = my_id;
+    ctx->cache_line_size = rdma_param.cache_line_size;
+    ctx->shm_my_thread = reinterpret_cast<ShmThreadRegion *>(
+        static_cast<char *>(my_base) + my_hdr->thread_region_offset +
+        size_t(tid) * sizeof(ShmThreadRegion));
+
+    for (int m = 0; m < n; m++) {
+      auto *phdr = static_cast<ShmSegmentHeader *>(shm_peer_base[m]);
+      ctx->shm_peer_part[m] =
+          static_cast<char *>(shm_peer_base[m]) + phdr->part_offset;
+      ctx->shm_peer_thread[m] = reinterpret_cast<ShmThreadRegion *>(
+          static_cast<char *>(shm_peer_base[m]) + phdr->thread_region_offset +
+          size_t(tid) * sizeof(ShmThreadRegion));
+      ctx->for_read_ptr[m] = vec_part_ptr;
+      ctx->remote_mr_msg[m].read_vaddr =
+          reinterpret_cast<uintptr_t>(ctx->shm_peer_part[m]);
+      ctx->remote_mr_msg[m].write_vaddr = reinterpret_cast<uintptr_t>(
+          &ctx->shm_peer_thread[m]->recv_buf[my_id][0][0]);
+    }
+
+    local_send_write->init();
+    local_recv_write->init(&ctx->shm_my_thread->recv_buf[0][0][0]);
+
+    for (size_t b = 0; b < MAX_CACHE_VEC; b++) {
+      ctx->read_to_ptr[b] = local_buf->vector[b];
+    }
+    memset(ctx->read_to_ptr[0], 0, MAX_CACHE_VEC * MAX_VEC_LEN);
+    for (int m = 0; m < n; m++) {
+      for (size_t b = 0; b < MAX_WRITE_NUM; b++) {
+        ctx->send_write_ptr[m][b] = local_send_write->buffer[m][b];
+        ctx->recv_write_ptr[m][b] = local_recv_write->buffer[m][b];
+      }
+    }
+  });
+
+  printf("SHM RDMA communication init over.\n");
+}
+
 void RdmaCommunication::com_init(
     char *vec_part_ptr, size_t vec_part_len, RdmaParameter &input_param) {
   // on_each([&](uint64 tid, uint64 total) {
   auto *main_ctx = rdma_ctx.getLocal();
   memset(main_ctx, 0, sizeof(RdmaContext));
   rdma_param = input_param;
+  if (rdma_param.is_shm()) {
+    com_init_shm(vec_part_ptr, vec_part_len);
+    return;
+  }
 
   struct ibv_device *ib_dev = ctx_find_dev(&rdma_param.ib_devname);
   if (!ib_dev) {
