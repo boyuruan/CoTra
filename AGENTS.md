@@ -263,13 +263,6 @@ parser.
   in `dispatch_kmeans_query_start`. Most `*_Kshnot_anns.sh` scripts pass
   `shared_nothing` (only `deep/100M_16P_*` pass `Kshared_nothing`), and
   `sift/10M_16P_Kshnot_anns.sh` and `deep/10M_16P_Kshnot_anns.sh` run plain `b2`.
-- **The owner of a TASK keeps results by an inverted test.** The issuer
- sets `ef_fill = top_candidates.size() < ef` (still filling); the owner
- keeps a distance when `!task.ef_fill || dist < task.lower_bound`. After
- the pre-stage top-ef is full, so out-of-line results come back
- unfiltered: on SIFT1M 4P at ef 100, 6848 of 154390 RESULT entries were
- accepted. The issuer re-tests every entry, so recall does not depend on
- it; RESULT bytes do.
 - `README.md` documents `--dist_fn ip`; the code accepts only `l2` and `mips`
   (plus `cosine` at build time).
 - `--app_type b2kmeans` parses, but `test_vs_recall` has no case for it, so it

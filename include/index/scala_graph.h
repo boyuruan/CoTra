@@ -575,7 +575,7 @@ class ScalaGraphIndex {
             // id)
             tman.task_queue[pid].emplace_back(
                 task.machine_id, task.qid, deg, tmp_ofs_for_micro_combine, 0,
-                0);
+                1);  // no bound: ef_fill 1
             res_msg.post_cnt++;
           }
           ofs += (deg + 1) * 4LL;
@@ -597,7 +597,7 @@ class ScalaGraphIndex {
             // NOTE: send back to origin machine (task.machine_id, not partition
             // id)
             tman.task_queue[pid].emplace_back(
-                task.machine_id, task.qid, deg, ofs_ptr[0], 0, 0);
+                task.machine_id, task.qid, deg, ofs_ptr[0], 0, 1);  // no bound
             res_msg.post_cnt++;
             // tman.post_task++;
           }
@@ -686,7 +686,7 @@ class ScalaGraphIndex {
             // id)
             tman.task_queue[pid].emplace_back(
                 task.machine_id, task.qid, deg, tmp_ofs_for_micro_combine, 0,
-                0, 0, 1); // core count +0  nocore count +1
+                1, 0, 1); // no bound: ef_fill 1; core count +0  nocore count +1
             res_msg.post_cnt++;
           }
           ofs += deg * 4;
@@ -711,8 +711,8 @@ class ScalaGraphIndex {
             // NOTE: send back to origin machine (task.machine_id, not partition
             // id)
             tman.task_queue[pid].emplace_back(
-                task.machine_id, task.qid, deg, ofs_ptr[0], 0, 0, 0, 1); 
-            // core count +0  nocore count +1
+                task.machine_id, task.qid, deg, ofs_ptr[0], 0, 1, 0, 1);
+            // no bound: ef_fill 1; core count +0  nocore count +1
             res_msg.post_cnt++;
             // tman.post_task++;
           }

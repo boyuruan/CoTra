@@ -3136,7 +3136,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
               char *vec_data = vec_ptr + ((*(ngh_arr + d)) - part_ofs) * data_label_size;
               dist_t dist = fstdistfunc_(
                   global_query[task.qid]->vector, vec_data, dist_func_param_);
-              if (!task.ef_fill || dist < task.lower_bound) {
+              // ef_fill: the issuer's top-ef was not full, or the task came
+              // from node expansion and carries no bound. Keep everything.
+              if (task.ef_fill || dist < task.lower_bound) {
                 res_msg.res.emplace_back(dist, ngh_arr[d]);
               }
             }

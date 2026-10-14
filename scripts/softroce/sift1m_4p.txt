@@ -220,3 +220,27 @@ recall	base_MB	pq32_MB	pq16_MB	base_ops	pq32_ops	pq16_ops
 0.98	157.6	124.0 (-21.4%)	124.3 (-21.1%)	557.5K	322.8K (-42.1%)	324.1K (-41.9%)
 READ posts fall 82-84%; WRITE bytes fall 1-2%. After the gate (pq32,
 ef 100), QUERY 18.91 MB and SYNC 10.36 MB are 78% of the 37.42 MB left.
+
+TASK result filter fixed, same index and flags, no PQ, 2026-10-14.
+All tables above were measured before this fix.
+The owner kept a distance when !ef_fill || dist < lower_bound, while the
+issuer sets ef_fill = top-ef not full, so after the pre-stage nothing was
+filtered. The test is now ef_fill || dist < lower_bound. Node-expansion
+tasks carry no bound and now pass ef_fill 1, so they still return every
+distance. For a task sent with top-ef full, the issuer's bound only
+tightens before the result arrives, so the dropped entries are ones it
+would have rejected.
+Logs: tmp/sift1m-4p/logs/fix-base/ against pq-base/.
+
+ef	base_recall	fix_recall	base_RESULT_B	fix_RESULT_B	base_RESULT_deliv	fix_RESULT_deliv	base_RESULT_pass	fix_RESULT_pass	base_write_B	fix_write_B
+10	0.60266	0.60275	546806	199004	50267	6820	1381	1372	9836668	9490036
+50	0.84209	0.84156	1050240	406232	96804	16220	3862	3881	21122978	20524701
+100	0.91372	0.91363	1675570	646598	154390	25772	6848	6842	35494966	34486672
+200	0.95841	0.95830	2589954	994564	237869	38499	10986	11040	64898970	63508625
+300	0.97426	0.97433	3387228	1302158	310223	49558	14720	14725	95371210	93073061
+500	0.98576	0.98583	4449096	1707834	405674	63059	19935	19939	156937287	154389864
+700	0.99049	0.99049	5261260	2028116	477974	73579	24107	24129	221300942	218210406
+Recall differs from base by at most 0.00023 per ef, except ef 50 at
+-0.00053 (shadow against base reached 0.00048). RESULT posts are unchanged:
+every task still answers so the issuer can count completions. At recall
+0.95, WRITE is 55.57 MB against 56.93 MB (-2.4%); READ is unchanged.
