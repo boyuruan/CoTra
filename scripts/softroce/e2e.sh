@@ -22,6 +22,7 @@ SKIP_INDEX=${SKIP_INDEX:-0}
 SKIP_SINGLE=${SKIP_SINGLE:-0}
 PQ_CHUNKS=${PQ_CHUNKS:-0}
 PQ_TAU=${PQ_TAU:-0}
+IB_DEV=${IB_DEV:-rxe0}
 read -ra EXTRA_SEARCH <<< "${SEARCH_ARGS:-}"
 LOG_DIR=${LOG_DIR:-/tmp}
 WORKDIR=${WORKDIR:-/tmp/cotra-work-${N}}
@@ -97,7 +98,9 @@ run_all() {
   local m lstatus failed=0
   local -a pids status
 
-  setup_memcached
+  if [[ "${IB_DEV}" != shm* ]]; then
+    setup_memcached
+  fi
   for ((m = 1; m < N; m++)); do
     stdbuf -oL -eL "${bin}" -m "${m}" "$@" >"${LOG_DIR}/${name}.m${m}.log" 2>&1 &
     pids[m]=$!
@@ -150,9 +153,11 @@ recall_at() {
   '
 }
 
-modprobe rdma_rxe
+if [[ "${IB_DEV}" != shm* ]]; then
+  modprobe rdma_rxe
+fi
 g++ --version | head -n 1
-echo "MACHINE_NUM=${N} SAMPLE_PERCENT=${SAMPLE_PERCENT}"
+echo "MACHINE_NUM=${N} SAMPLE_PERCENT=${SAMPLE_PERCENT} IB_DEV=${IB_DEV}"
 write_conf
 mkdir -p "${WORKDIR}" "${LOG_DIR}"
 g++ -O2 -o /tmp/check_remote /src/scripts/softroce/check_remote.cc
@@ -204,7 +209,9 @@ if (( PQ_CHUNKS > 0 )); then
   EXTRA_SEARCH+=(--pq_prefix "${PQ_PREFIX}" --pq_tau "${PQ_TAU}")
 fi
 
-link_rxe
+if [[ "${IB_DEV}" != shm* ]]; then
+  link_rxe
+fi
 
 # SAMPLE_PERCENT defaults to 0.01 as in the cluster scripts. The top index is
 # on every machine; at 1.0 it holds every point and the issuer finds GT locally.
@@ -222,7 +229,7 @@ COMMON=(
   --scala_v3
   --sample_percent "${SAMPLE_PERCENT}"
   -t 1
-  -d rxe0
+  -d "${IB_DEV}"
 )
 QUERY=(
   --query_path "${DATA}/query.bin"

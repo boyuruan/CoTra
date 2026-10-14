@@ -156,6 +156,11 @@ class RdmaParameter {
   RdmaParameter(commandLine &cmd);
   int parser(commandLine &cmd);
   void print_para();
+  bool is_shm() const {
+    return ib_devname != nullptr &&
+           (strcmp(ib_devname, "shm") == 0 ||
+            strncmp(ib_devname, "shm:", 4) == 0);
+  }
 };
 
 static int get_cache_line_size();

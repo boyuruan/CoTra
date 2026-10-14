@@ -6,10 +6,53 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 
+#include <atomic>
 #include <cstring>
 
 #include "anns/vec_buffer.h"
 #include "rdma_param.h"
+
+#define COTRA_SHM_MAGIC (0x434f54524153484dULL)
+#define SHM_CQ_CAP (MAX_WRITE_NUM * 2)
+#define SHM_SEND_CQ_CAP ((MAX_WRITE_NUM + MAX_READ_NUM) * MACHINE_NUM * 2)
+
+struct ShmWcEntry {
+  uint64_t wr_id;
+  uint32_t byte_len;
+  uint32_t imm_data;
+  uint32_t opcode;
+  uint32_t status;
+};
+
+struct alignas(64) ShmSpscRing {
+  std::atomic<uint64_t> write_idx;
+  char pad0[64 - sizeof(std::atomic<uint64_t>)];
+  std::atomic<uint64_t> read_idx;
+  char pad1[64 - sizeof(std::atomic<uint64_t>)];
+  ShmWcEntry entries[SHM_CQ_CAP];
+};
+
+struct alignas(64) ShmThreadRegion {
+  ShmSpscRing recv_rings[MACHINE_NUM];
+  ShmWcEntry send_cq[SHM_SEND_CQ_CAP];
+  char recv_buf[MACHINE_NUM][MAX_WRITE_NUM][MAX_QUERYBUFFER_SIZE];
+};
+
+struct alignas(64) ShmSegmentHeader {
+  std::atomic<uint64_t> magic;
+  std::atomic<uint64_t> instance_id;
+  uint32_t machine_id;
+  uint32_t machine_num;
+  uint32_t thread_num;
+  uint32_t pad0;
+  uint64_t part_offset;
+  uint64_t part_len;
+  uint64_t thread_region_offset;
+  uint64_t total_bytes;
+  std::atomic<uint64_t> ack_from[MACHINE_NUM];
+  std::atomic<uint64_t> ack_target[MACHINE_NUM];
+  std::atomic<uint32_t> all_connected;
+};
 
 struct MessageContext {
   int lid;
@@ -119,6 +162,22 @@ class RdmaContext {
 
   // uint64_t size;
   int cache_line_size;
+
+  // Shared-memory transport state (-d shm). Kept POD so memcpy of RdmaContext
+  // across threads in com_init stays valid.
+  bool is_shm_mode;
+  int thread_id;
+  uint32_t shm_rr_peer;
+  uint32_t shm_send_head;
+  uint32_t shm_send_tail;
+  char *shm_peer_part[MACHINE_NUM];
+  ShmThreadRegion *shm_my_thread;
+  ShmThreadRegion *shm_peer_thread[MACHINE_NUM];
+
+  void shm_push_send_wc(uint64_t wr_id, uint32_t opcode);
+  void shm_push_recv_wc(
+      int target_machine, uint64_t wr_id, uint32_t byte_len, uint32_t imm_data,
+      uint32_t opcode);
 
   void clear_size_cnt() {
     read_size = read_cnt = 0;
