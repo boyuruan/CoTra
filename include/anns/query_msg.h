@@ -218,8 +218,21 @@ class QueryMsg {
     return;
   }
 
+  // Byte accounting for a serialized query. sec[0] is everything before the
+  // top candidates, sec[1] the top candidates, sec[2] the candidate set,
+  // sec[3] the result, each including its own count field.
+  static void add_sections(
+      uint64_t* sec, size_t head_end, size_t top_end, size_t cand_end,
+      size_t res_end) {
+    if (sec == nullptr) return;
+    sec[0] += head_end;
+    sec[1] += top_end - head_end;
+    sec[2] += cand_end - top_end;
+    sec[3] += res_end - cand_end;
+  }
+
   // New Serialization function, without visit list.
-  size_t serialize2(void* dest) {
+  size_t serialize2(void* dest, uint64_t* sec = nullptr) {
     size_t offset = 0;
     memcpy(static_cast<char*>(dest) + offset, &ef, sizeof(ef));
     offset += sizeof(ef);
@@ -275,6 +288,7 @@ class QueryMsg {
     // #ifdef PROFILER
     //     profiler.serialize(static_cast<char*>(dest), offset);
     // #endif
+    size_t head_end = offset;
 
     // Serialize top_candidates
     // printf("Serialize top_candidates\n");
@@ -290,6 +304,7 @@ class QueryMsg {
       offset += sizeof(elem);
       top_candidates.pop();
     }
+    size_t top_end = offset;
 
     // Serialize candidate_set
     // TODO: Filter candset
@@ -311,6 +326,7 @@ class QueryMsg {
           static_cast<char*>(dest) + offset, &filter_ele, sizeof(filter_ele));
       offset += sizeof(filter_ele);
     }
+    size_t cand_end = offset;
 
     // size_t candidate_set_size = candidate_set.size();
     // memcpy(
@@ -338,6 +354,7 @@ class QueryMsg {
       offset += sizeof(elem);
       result.pop();
     }
+    add_sections(sec, head_end, top_end, cand_end, offset);
 
 #ifdef DEBUG
     memcpy(static_cast<char*>(dest) + offset, tmp_m_cnt, sizeof(tmp_m_cnt));
@@ -355,7 +372,7 @@ class QueryMsg {
   /**
    * Fork QueryMsg in different core machines.
    */
-  size_t fork(uint32_t machine_id, void* dest) {
+  size_t fork(uint32_t machine_id, void* dest, uint64_t* sec = nullptr) {
     size_t offset = 0;
     memcpy(static_cast<char*>(dest) + offset, &ef, sizeof(ef));
     offset += sizeof(ef);
@@ -411,6 +428,7 @@ class QueryMsg {
     // #ifdef PROFILER
     //     profiler.serialize(static_cast<char*>(dest), offset);
     // #endif
+    size_t head_end = offset;
 
     // Serialize top_candidates
     // printf("Serialize top_candidates\n");
@@ -428,6 +446,7 @@ class QueryMsg {
       top_candidates.pop();
     }
     swap(top_candidates, top_candidates_copy);
+    size_t top_end = offset;
 
     // Serialize candidate_set
     size_t filter_queue_size = filterred[machine_id].size();
@@ -440,6 +459,7 @@ class QueryMsg {
           static_cast<char*>(dest) + offset, &filter_ele, sizeof(filter_ele));
       offset += sizeof(filter_ele);
     }
+    size_t cand_end = offset;
 
     // TODO: if the final transmission (state = END), only need the result.
     // Serialize result
@@ -454,6 +474,7 @@ class QueryMsg {
       offset += sizeof(elem);
       result.pop();
     }
+    add_sections(sec, head_end, top_end, cand_end, offset);
 
     assert(offset <= MAX_QUERYBUFFER_SIZE);
     if (offset > MAX_QUERYBUFFER_SIZE) {

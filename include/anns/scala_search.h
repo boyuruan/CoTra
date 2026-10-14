@@ -524,6 +524,12 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
     uint64_t type_size[CLEAR + 1] = {0}, type_cnt[CLEAR + 1] = {0};
     uint64_t deliv[CH_NUM] = {0}, dup[CH_NUM] = {0}, pass[CH_NUM] = {0};
     uint64_t gated[CH_NUM] = {0};
+    // [purpose][cnt, head, top, cand, result]
+    uint64_t query[2][5] = {{0}};
+    // cnt, head, cand, target, other, token
+    uint64_t sync[6] = {0};
+    // expand, node task, exact dist, pq dist
+    uint64_t work[4] = {0};
 
     for (uint32_t t = 0; t < getActiveThreads(); ++t) {
       auto *ctx = rdma_comm.rdma_ctx.getRemote(t);
@@ -541,6 +547,23 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
         pass[c] += ctx->chan_pass[c];
         gated[c] += ctx->chan_gated[c];
       }
+      for (int p = 0; p < 2; p++) {
+        query[p][0] += ctx->query_cnt[p];
+        query[p][1] += ctx->query_head[p];
+        query[p][2] += ctx->query_top[p];
+        query[p][3] += ctx->query_cand[p];
+        query[p][4] += ctx->query_result[p];
+      }
+      sync[0] += ctx->sync_cnt;
+      sync[1] += ctx->sync_head;
+      sync[2] += ctx->sync_cand;
+      sync[3] += ctx->sync_target;
+      sync[4] += ctx->sync_other;
+      sync[5] += ctx->sync_token;
+      work[0] += ctx->work_expand;
+      work[1] += ctx->work_node_task;
+      work[2] += ctx->work_dist;
+      work[3] += ctx->work_pq_dist;
     }
     float read_sz_ps = 1000000.0 * (all_read_size >> 20) / time;
     float read_num_ps = 1000000.0 * all_read_cnt / time;
@@ -574,6 +597,26 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
           (unsigned long long)dup[c], (unsigned long long)pass[c],
           (unsigned long long)gated[c]);
     }
+    // QUERY bytes by purpose and section, SYNC bytes by section, and the
+    // work this machine did. Byte sections of a type sum to its WriteType.
+    static const char *query_name[2] = {"FORK", "MIGRATE"};
+    for (int p = 0; p < 2; p++) {
+      printf(
+          "Query: %s Cnt: %llu Head: %llu Top: %llu Cand: %llu Result: %llu\n",
+          query_name[p], (unsigned long long)query[p][0],
+          (unsigned long long)query[p][1], (unsigned long long)query[p][2],
+          (unsigned long long)query[p][3], (unsigned long long)query[p][4]);
+    }
+    printf(
+        "Sync: Cnt: %llu Head: %llu Cand: %llu Target: %llu Other: %llu "
+        "Token: %llu\n",
+        (unsigned long long)sync[0], (unsigned long long)sync[1],
+        (unsigned long long)sync[2], (unsigned long long)sync[3],
+        (unsigned long long)sync[4], (unsigned long long)sync[5]);
+    printf(
+        "Work: Expand: %llu NodeTask: %llu Dist: %llu PqDist: %llu\n",
+        (unsigned long long)work[0], (unsigned long long)work[1],
+        (unsigned long long)work[2], (unsigned long long)work[3]);
     printf("--------------------  End  --------------------\n");
   }
 
@@ -2145,6 +2188,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
     _mm_prefetch((char *)(ngh_arr + 1), _MM_HINT_T0);
     worklists::Chunk<std::pair<dist_t, uint32_t>, MAX_GRAPH_DEG> chunk(
         task.is_count);
+#ifdef COMM_PROFILE
+    RdmaContext *comm_ctx = rdma_comm.rdma_ctx.getLocal();
+#endif
     for (uint32_t d = 0; d < task.deg; d++) {
       _mm_prefetch(
           vec_ptr + ((*(ngh_arr + d + 1)) - part_ofs) * data_label_size, _MM_HINT_T0);
@@ -2153,6 +2199,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
       if (!global_query[task.qid]->visit_hash.CheckAndSet(*(ngh_arr + d))) {
 #ifdef PROF_COMPUTATION
         computation_cnt ++;
+#endif
+#ifdef COMM_PROFILE
+        comm_ctx->work_dist++;
 #endif
         char *vec_data = vec_ptr + ((*(ngh_arr + d)) - part_ofs) * data_label_size;
         dist_t dist = fstdistfunc_(
@@ -2278,6 +2327,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
       // Traverse on base index. (Use one-side migrate)
       dist_t dist = fstdistfunc_(
           global_query[query_id]->vector, ep_data, dist_func_param_);
+#ifdef COMM_PROFILE
+      comm_ctx->work_dist++;
+#endif
       global_query[query_id]->lowerBound = dist;
       global_query[query_id]->pre_top_cand.emplace(dist, enterpoint);
       global_query[query_id]->pre_cand_set.emplace(-dist, enterpoint);
@@ -2313,6 +2365,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
           if (!global_query[query_id]->visit_hash.CheckAndSet(gt_id)) {
 #ifdef PROF_COMPUTATION
             computation_cnt ++;
+#endif
+#ifdef COMM_PROFILE
+            comm_ctx->work_dist++;
 #endif
             char *vec_data = graph_index.top_index->get_vector(ngh_arr[d]);
             dist_t dist = fstdistfunc_(
@@ -2482,17 +2537,23 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
                 // remote node task.
                 tman.add_remote_task(ngh_id, mid, query_id);
                 post_cnt++;
+#ifdef COMM_PROFILE
+                comm_ctx->work_node_task++;
+#endif
               } else {
                 // local node.
 #ifdef COMM_PROFILE
                 uint64_t *gated = comm_ctx->chan_gated;
+                uint64_t *pq_dist = &comm_ctx->work_pq_dist;
+                comm_ctx->work_expand++;
 #else
                 uint64_t *gated = nullptr;
+                uint64_t *pq_dist = nullptr;
 #endif
                 post_cnt += graph_index.scala_graph
                                 ->scala_graph_v3_get_subquery_task_lb(
                                     ngh_id, query_id, tman, ba_task_queue,
-                                    gated);
+                                    gated, pq_dist);
               }
             }
 #ifdef DEBUG
@@ -2596,6 +2657,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
 #ifdef PROF_COMPUTATION
                   computation_cnt ++;
 #endif
+#ifdef COMM_PROFILE
+                  comm_ctx->work_dist++;
+#endif
                   char *vec_data =
                       vec_ptr + ((*(ngh_arr + d)) - part_ofs) * data_label_size;
                   dist_t dist = fstdistfunc_(
@@ -2664,6 +2728,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
 #ifdef PROF_COMPUTATION
                 computation_cnt ++;
 #endif
+#ifdef COMM_PROFILE
+                comm_ctx->work_dist++;
+#endif
                 char *vec_data = vec_ptr + (vid - part_ofs) * data_label_size;
                 dist_t dist = fstdistfunc_(
                     global_query[query_id]->vector, vec_data, dist_func_param_);
@@ -2702,6 +2769,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
               if (!global_query[query_id]->visit_hash.CheckAndSet(ngh_id)) {
 #ifdef PROF_COMPUTATION
                 computation_cnt ++;
+#endif
+#ifdef COMM_PROFILE
+                comm_ctx->work_dist++;
 #endif
                 dist_t dist = fstdistfunc_(
                     global_query[query_id]->vector, vec_ptr, dist_func_param_);
@@ -2879,6 +2949,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
     auto &task_queue = tman.get_local_task_queue();
     auto &node_queue = tman.get_node_task_queue();
     auto &node_res_queue = tman.get_node_result_queue();
+#ifdef COMM_PROFILE
+    RdmaContext *comm_ctx = rdma_comm.rdma_ctx.getLocal();
+#endif
 
     auto &result_queue = tman.get_result_queue();
     // migrate query queue, in v3 only used for end query.
@@ -2998,6 +3071,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
               if (!global_query[task.qid]->visit_hash.CheckAndSet(ngh_arr[d])) {
 #ifdef PROF_COMPUTATION
                 computation_cnt ++;
+#endif
+#ifdef COMM_PROFILE
+                comm_ctx->work_dist++;
 #endif
                 char *vec_data = vec_ptr + ((*(ngh_arr + d)) - part_ofs) * data_label_size;
                 dist_t dist = fstdistfunc_(
@@ -3132,6 +3208,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
             if (!global_query[task.qid]->visit_hash.CheckAndSet(ngh_arr[d])) {
 #ifdef PROF_COMPUTATION
               computation_cnt ++;
+#endif
+#ifdef COMM_PROFILE
+              comm_ctx->work_dist++;
 #endif
               char *vec_data = vec_ptr + ((*(ngh_arr + d)) - part_ofs) * data_label_size;
               dist_t dist = fstdistfunc_(

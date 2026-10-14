@@ -45,6 +45,13 @@ class RdmaContext {
   // dropped by the PQ gate before they were sent.
   uint64_t chan_deliv[CH_NUM], chan_dup[CH_NUM], chan_pass[CH_NUM];
   uint64_t chan_gated[CH_NUM];
+  // QUERY bytes by section; index 0 is fork, 1 is migrate.
+  uint64_t query_cnt[2], query_head[2], query_top[2], query_cand[2];
+  uint64_t query_result[2];
+  // SYNC bytes by section, and how many carried the termination token.
+  uint64_t sync_cnt, sync_head, sync_cand, sync_target, sync_other, sync_token;
+  // Nodes expanded here, node tasks sent, exact and PQ distances computed.
+  uint64_t work_expand, work_node_task, work_dist, work_pq_dist;
 
   MessageContext local_mr_msg[MACHINE_NUM];
   MessageContext remote_mr_msg[MACHINE_NUM];
@@ -120,6 +127,14 @@ class RdmaContext {
     memset(chan_dup, 0, sizeof(chan_dup));
     memset(chan_pass, 0, sizeof(chan_pass));
     memset(chan_gated, 0, sizeof(chan_gated));
+    memset(query_cnt, 0, sizeof(query_cnt));
+    memset(query_head, 0, sizeof(query_head));
+    memset(query_top, 0, sizeof(query_top));
+    memset(query_cand, 0, sizeof(query_cand));
+    memset(query_result, 0, sizeof(query_result));
+    sync_cnt = sync_head = sync_cand = sync_target = sync_other = 0;
+    sync_token = 0;
+    work_expand = work_node_task = work_dist = work_pq_dist = 0;
   }
 
   enum ibv_mtu set_mtu(uint8_t ib_port, int user_mtu);

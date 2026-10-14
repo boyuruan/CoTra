@@ -406,7 +406,8 @@ class ScalaGraphIndex {
   template <typename dist_t>
   uint32_t scala_graph_v3_get_subquery_task_lb(
       uint32_t current_node_id, uint32_t query_id, TaskManager<dist_t> &tman,
-      BalanceQueue<ComputeTask<dist_t>> &ib, uint64_t *gated = nullptr) {
+      BalanceQueue<ComputeTask<dist_t>> &ib, uint64_t *gated = nullptr,
+      uint64_t *pq_dist_cnt = nullptr) {
     if (current_node_id < partition_ofs ||
         current_node_id >= partition_ofs + local_part_vec_num) {
       printf(
@@ -426,6 +427,7 @@ class ScalaGraphIndex {
     float pq_bound = (float)lb * pq_scale;
     auto pq_drop = [&](uint32_t vid, int chan) {
       if (pq == nullptr || ef_fill) return false;
+      if (pq_dist_cnt != nullptr) (*pq_dist_cnt)++;
       if (pq->dist(qvec, vid) <= pq_bound) return false;
       if (gated != nullptr) gated[chan]++;
       return !pq_shadow;

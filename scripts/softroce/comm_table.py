@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Sum scala_v3 COMM_PROFILE blocks across machines, per ef.
 
-usage: comm_table.py LOG_DIR N [--types] [--chan] [--at R1,R2,...]
+usage: comm_table.py LOG_DIR N [--types] [--chan] [--sections]
+                     [--at R1,R2,...]
 
 Reads LOG_DIR/search.m{0..N-1}.log. Each machine prints one COMM block and
-then its ef row; machine 0's row carries the all-machine recall. --at
-interpolates the summed counters linearly in recall between the two ef rows
-that bracket each target, so runs with different recall-per-ef compare at
-the same recall.
+then its ef row; machine 0's row carries the all-machine recall. --sections
+prints QUERY bytes by purpose (fork, migrate) and section, SYNC bytes by
+section, and the summed work counters. --at interpolates the summed
+counters linearly in recall between the two ef rows that bracket each
+target, so runs with different recall-per-ef compare at the same recall.
 """
 import argparse
 import re
@@ -19,6 +21,17 @@ TOTAL = re.compile(
 WTYPE = re.compile(r"WriteType: (\w+) Bytes: (\d+) Cnt: (\d+)")
 CHAN = re.compile(
     r"Chan: (\w+) Deliv: (\d+) Dup: (\d+) Pass: (\d+) Gated: (\d+)")
+QUERY = re.compile(
+    r"Query: (\w+) Cnt: (\d+) Head: (\d+) Top: (\d+) Cand: (\d+) "
+    r"Result: (\d+)")
+SYNC = re.compile(
+    r"Sync: Cnt: (\d+) Head: (\d+) Cand: (\d+) Target: (\d+) Other: (\d+) "
+    r"Token: (\d+)")
+WORK = re.compile(
+    r"Work: Expand: (\d+) NodeTask: (\d+) Dist: (\d+) PqDist: (\d+)")
+QUERY_COLS = ("cnt", "head", "top", "cand", "result")
+SYNC_COLS = ("cnt", "head", "cand", "target", "other", "token")
+WORK_COLS = ("expand", "node_task", "dist", "pq_dist")
 
 
 def parse(path):
@@ -40,6 +53,19 @@ def parse(path):
                 cur.setdefault("chan", {})[m.group(1)] = tuple(
                     int(x) for x in m.groups()[1:])
                 continue
+            m = QUERY.search(line)
+            if m:
+                cur.setdefault("query", {})[m.group(1)] = tuple(
+                    int(x) for x in m.groups()[1:])
+                continue
+            m = SYNC.search(line)
+            if m:
+                cur["sync"] = tuple(int(x) for x in m.groups())
+                continue
+            m = WORK.search(line)
+            if m:
+                cur["work"] = tuple(int(x) for x in m.groups())
+                continue
             m = ROW.match(line)
             if m and "rb" in cur:
                 cur["ef"] = int(m.group(1))
@@ -58,6 +84,13 @@ def add(acc, row):
     for ch, v in row.get("chan", {}).items():
         old = acc.setdefault("chan", {}).get(ch, (0, 0, 0, 0))
         acc["chan"][ch] = tuple(a + b for a, b in zip(old, v))
+    for p, v in row.get("query", {}).items():
+        old = acc.setdefault("query", {}).get(p, (0,) * len(QUERY_COLS))
+        acc["query"][p] = tuple(a + b for a, b in zip(old, v))
+    for k, cols in (("sync", SYNC_COLS), ("work", WORK_COLS)):
+        if k in row:
+            old = acc.get(k, (0,) * len(cols))
+            acc[k] = tuple(a + b for a, b in zip(old, row[k]))
 
 
 def main():
@@ -66,6 +99,7 @@ def main():
     ap.add_argument("n", type=int)
     ap.add_argument("--types", action="store_true")
     ap.add_argument("--chan", action="store_true")
+    ap.add_argument("--sections", action="store_true")
     ap.add_argument("--at", default="")
     a = ap.parse_args()
 
@@ -104,6 +138,24 @@ def main():
             cells = ["/".join(str(x) for x in r.get("chan", {}).get(
                 c, (0, 0, 0, 0))) for c in names]
             print(f"{r['ef']}\t" + "\t".join(cells))
+
+    if a.sections:
+        for p in ("FORK", "MIGRATE"):
+            print(f"\nQUERY {p} bytes by section")
+            print("ef\t" + "\t".join(QUERY_COLS))
+            for r in table:
+                v = r.get("query", {}).get(p, (0,) * len(QUERY_COLS))
+                print(f"{r['ef']}\t" + "\t".join(str(x) for x in v))
+        print("\nSYNC bytes by section; target is the receiver's own lists")
+        print("ef\t" + "\t".join(SYNC_COLS))
+        for r in table:
+            v = r.get("sync", (0,) * len(SYNC_COLS))
+            print(f"{r['ef']}\t" + "\t".join(str(x) for x in v))
+        print("\nwork summed over machines")
+        print("ef\t" + "\t".join(WORK_COLS))
+        for r in table:
+            v = r.get("work", (0,) * len(WORK_COLS))
+            print(f"{r['ef']}\t" + "\t".join(str(x) for x in v))
 
     if a.at:
         print("\nat recall (linear in recall between bracketing ef rows)")

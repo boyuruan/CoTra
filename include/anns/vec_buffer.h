@@ -103,7 +103,11 @@ struct SyncMsg {
     }
   }
 
-  size_t serialize(char* ptr) {
+  // target is the receiving machine; sec, when given, accumulates bytes by
+  // section: header, local_add_cand, target's neighbor lists, every other
+  // machine's neighbor lists. The receiver reads only its own lists.
+  size_t serialize(
+      char* ptr, uint32_t target = MACHINE_NUM, uint64_t* sec = nullptr) {
     size_t offset = 0;
     memcpy(ptr + offset, &qid, sizeof(qid));
     offset += sizeof(qid);
@@ -119,6 +123,7 @@ struct SyncMsg {
     offset += sizeof(last_is_white);
     memcpy(ptr + offset, &lower_bound, sizeof(lower_bound));
     offset += sizeof(lower_bound);
+    size_t head_end = offset;
 
     std::vector<std::pair<dist_t, uint32_t>> filterred_local_cand;
     for (std::pair<dist_t, uint32_t>& elem : local_add_cand) {
@@ -135,8 +140,11 @@ struct SyncMsg {
       memcpy(ptr + offset, &elem, sizeof(elem));
       offset += sizeof(elem);
     }
+    size_t cand_end = offset;
+    size_t target_bytes = 0;
     // TODO: serialize only target machine.
     for (uint32_t i = 0; i < MACHINE_NUM; i++) {
+      size_t list_begin = offset;
       uint32_t size2 = core_micro_ngh[i].size();
       memcpy(ptr + offset, &size2, sizeof(size2));
       offset += sizeof(size2);
@@ -153,9 +161,16 @@ struct SyncMsg {
         offset += sizeof(elem);
         // printf("emplace-sync %llu %u\n", elem.first, elem.second);
       }
+      if (i == target) target_bytes = offset - list_begin;
       // printf(
       //     "send to q%u sync task size %u, %u, ofs %llu\n", qid, size2, size3,
       //     offset);
+    }
+    if (sec != nullptr) {
+      sec[0] += head_end;
+      sec[1] += cand_end - head_end;
+      sec[2] += target_bytes;
+      sec[3] += offset - cand_end - target_bytes;
     }
     if (offset >= MAX_QUERYBUFFER_SIZE) {
       printf("Error: sync msg exceed buffer size\n");
