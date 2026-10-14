@@ -180,14 +180,6 @@ class RdmaCommunication {
       free(res_ptr);
     }
 
-    while (rbuf->recv_node_sync.size() > 0) {
-      char *sync_ptr = rbuf->recv_node_sync.front();
-      rbuf->recv_node_sync.pop_front();
-      // printf("dese res\n");
-      tman.deserialize_node_sync(sync_ptr);
-      free(sync_ptr);
-    }
-
     // printf("collect compute\n");
     while (rbuf->recv_compute.size() > 0) {
 #ifdef PROFILER
@@ -234,14 +226,31 @@ class RdmaCommunication {
 #endif
     }
 
+    size_t nsync_sz = rbuf->recv_node_sync.size();
+    for (size_t i = 0; i < nsync_sz; i++) {
+      char *sync_ptr = rbuf->recv_node_sync.front();
+      rbuf->recv_node_sync.pop_front();
+      if (!tman.can_apply_node_sync(sync_ptr)) {
+        rbuf->recv_node_sync.push_back(sync_ptr);
+        continue;
+      }
+      tman.deserialize_node_sync(sync_ptr);
+      free(sync_ptr);
+    }
+
     // printf("collect sync\n");
     // Collect sub-queries sync msg.
-    while (rbuf->sync_queue.size() > 0) {
+    size_t sync_sz = rbuf->sync_queue.size();
+    for (size_t i = 0; i < sync_sz; i++) {
 #ifdef PROFILER
       profiler->start("g_poll_proc");
 #endif
       char *sync_ptr = rbuf->sync_queue.front();
       rbuf->sync_queue.pop_front();
+      if (!tman.can_apply_sync(sync_ptr)) {
+        rbuf->sync_queue.push_back(sync_ptr);
+        continue;
+      }
       tman.deserialize_sync(sync_ptr);  // impl
       free(sync_ptr);
 #ifdef PROFILER
