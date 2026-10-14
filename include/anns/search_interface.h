@@ -17,7 +17,7 @@
 
 // #define LAT
 // #define PROFILER
-// #define COMM_PROFILE
+#define COMM_PROFILE
 
 #ifndef NO_MANUAL_VECTORIZATION
 #if (defined(__SSE__) || _M_IX86_FP > 0 || defined(_M_AMD64) || defined(_M_X64))

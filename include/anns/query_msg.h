@@ -86,6 +86,8 @@ class QueryMsg {
 
   // indicate whether new (has coro) for this machine, forbid serialize.
   bool is_new{true};
+  // Set once the finished query is handed to recall accounting.
+  bool result_taken{false};
 
   // group cand nghs
   //   std::pair<dist_t, uint32_t> group_nodes[CAND_GROUP_SIZE];
@@ -139,7 +141,7 @@ class QueryMsg {
   std::priority_queue<std::pair<dist_t, size_t>> result;
 
   QueryMsg() {}
-  ~QueryMsg() {}
+  ~QueryMsg() { free(vector); }
 
   QueryMsg(QueryState _state) : state(_state), origin_machine(0) {}
 

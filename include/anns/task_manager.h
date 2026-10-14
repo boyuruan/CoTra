@@ -53,7 +53,7 @@ class TaskManager {
   uint32_t cur_query_num{0};
 
   // For migration.
-  QueryMsg<dist_t>** global_query;
+  QueryMsg<dist_t>** global_query{nullptr};
   std::vector<size_t> query_queue;
 
   std::mutex schequery_mutex;

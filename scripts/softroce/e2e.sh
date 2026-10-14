@@ -1,19 +1,25 @@
 #!/bin/bash
-# Build a synthetic uint8 set, then scalagraph_v3 index and scala_v3 search,
-# then single on the merged graph as the reference. MACHINE_NUM processes
-# (default 2), one rxe, machine id from -m. Same flags a later dataset uses,
-# except -Q matches this query file. Expects the repo at /src, --privileged,
-# --network host, and the host /lib/modules.
+# scalagraph_v3 index and scala_v3 search, then single on the merged graph
+# as the reference. MACHINE_NUM processes (default 2), one rxe, machine id
+# from -m. With DATA_DIR unset, builds the synthetic uint8 set. With DATA_DIR
+# set, uses that directory's base.bin, query.bin, gt.bin, and meta.txt
+# ("npts dim nq k", k is res_knn). The index goes to WORKDIR and logs to
+# LOG_DIR, so DATA_DIR can be read-only. Expects the repo at /src,
+# --privileged, --network host, and the host /lib/modules.
 set -euo pipefail
 
 N=${MACHINE_NUM:-2}
 SAMPLE_PERCENT=${SAMPLE_PERCENT:-0.01}
 SEARCH_TIMEOUT=${SEARCH_TIMEOUT:-300}
+INDEX_TIMEOUT=${INDEX_TIMEOUT:-300}
+SINGLE_TIMEOUT=${SINGLE_TIMEOUT:-300}
+LOG_DIR=${LOG_DIR:-/tmp}
+WORKDIR=${WORKDIR:-/tmp/cotra-work-${N}}
 CONF=/tmp/ip_local_${N}.conf
 PORT=21211
 BUILD=/tmp/cotra-build-${N}
-DATA=/tmp/cotra-synth
-PREFIX=${DATA}/idx${N}/merged
+DATA=${DATA_DIR:-/tmp/cotra-synth}
+PREFIX=${WORKDIR}/merged
 INDEX_BIN=${BUILD}/tests/scala_index
 ANNS_BIN=${BUILD}/tests/scala_anns
 # Pass rule at this ef: scala_v3 recall >= MIN_RECALL and >= single - MAX_GAP.
@@ -83,12 +89,12 @@ run_all() {
 
   setup_memcached
   for ((m = 1; m < N; m++)); do
-    stdbuf -oL -eL "${bin}" -m "${m}" "$@" >"/tmp/${name}.m${m}.log" 2>&1 &
+    stdbuf -oL -eL "${bin}" -m "${m}" "$@" >"${LOG_DIR}/${name}.m${m}.log" 2>&1 &
     pids[m]=$!
   done
   set +e
   stdbuf -oL -eL timeout --foreground "${timeout_s}" \
-    "${bin}" -m 0 "$@" >"/tmp/${name}.m0.log" 2>&1
+    "${bin}" -m 0 "$@" >"${LOG_DIR}/${name}.m0.log" 2>&1
   lstatus=$?
   set -e
   status[0]=${lstatus}
@@ -111,7 +117,7 @@ run_all() {
   done
   for ((m = 0; m < N; m++)); do
     echo "===== ${name} m${m} exit ${status[m]} (tail) ====="
-    tail -n 25 "/tmp/${name}.m${m}.log" || true
+    tail -n 25 "${LOG_DIR}/${name}.m${m}.log" || true
     [[ "${status[m]}" -eq 0 ]] || failed=1
   done
   if [[ ${failed} -ne 0 ]]; then
@@ -138,27 +144,37 @@ modprobe rdma_rxe
 g++ --version | head -n 1
 echo "MACHINE_NUM=${N} SAMPLE_PERCENT=${SAMPLE_PERCENT}"
 write_conf
-mkdir -p "${DATA}/idx${N}"
-g++ -O2 -o /tmp/gen_synth /src/scripts/softroce/gen_synth.cc
+mkdir -p "${WORKDIR}" "${LOG_DIR}"
 g++ -O2 -o /tmp/check_remote /src/scripts/softroce/check_remote.cc
-/tmp/gen_synth "${DATA}"
+if [[ -z "${DATA_DIR:-}" ]]; then
+  mkdir -p "${DATA}"
+  g++ -O2 -o /tmp/gen_synth /src/scripts/softroce/gen_synth.cc
+  /tmp/gen_synth "${DATA}"
+else
+  for f in base.bin query.bin gt.bin meta.txt; do
+    if [[ ! -f "${DATA}/${f}" ]]; then
+      echo "DATA_DIR ${DATA} is missing ${f}"
+      exit 1
+    fi
+  done
+fi
 read -r NPTS DIM NQ K < "${DATA}/meta.txt"
-echo "synthetic meta n=${NPTS} dim=${DIM} nq=${NQ} k=${K}"
+echo "dataset n=${NPTS} dim=${DIM} nq=${NQ} res_knn=${K}"
 if (( NQ % N != 0 )); then
   echo "nq ${NQ} is not divisible by MACHINE_NUM ${N}"
   exit 1
 fi
 
 if ! cmake -S /src -B "${BUILD}" -DCOTRA_WITH_INDEX=ON -DMACHINE_NUM="${N}" \
-  >/tmp/cmake-cfg.log 2>&1; then
+  >"${LOG_DIR}/cmake-cfg.log" 2>&1; then
   echo "cmake configure failed"
-  tail -n 80 /tmp/cmake-cfg.log || true
+  tail -n 80 "${LOG_DIR}/cmake-cfg.log" || true
   exit 1
 fi
 if ! cmake --build "${BUILD}" -j "$(nproc)" --target scala_index scala_anns \
-  >/tmp/cmake-build.log 2>&1; then
+  >"${LOG_DIR}/cmake-build.log" 2>&1; then
   echo "cmake build failed"
-  tail -n 80 /tmp/cmake-build.log || true
+  tail -n 80 "${LOG_DIR}/cmake-build.log" || true
   exit 1
 fi
 
@@ -189,7 +205,7 @@ QUERY=(
   -Q "${NQ}"
 )
 
-if ! run_all index 300 "${INDEX_BIN}" --graph_type scalagraph_v3 \
+if ! run_all index "${INDEX_TIMEOUT}" "${INDEX_BIN}" --graph_type scalagraph_v3 \
   "${COMMON[@]}"; then
   echo "soft-roce synthetic index build failed"
   exit 1
@@ -198,7 +214,7 @@ fi
 echo "===== out-of-line remote neighbor ids per machine ====="
 REMOTE_SUM=0
 for ((m = 0; m < N; m++)); do
-  r=$(awk '/^all_in_remote_ngh_num:/ { print $2 }' "/tmp/index.m${m}.log")
+  r=$(awk '/^all_in_remote_ngh_num:/ { print $2 }' "${LOG_DIR}/index.m${m}.log")
   echo "m${m} all_in_remote_ngh_num ${r:-missing}"
   REMOTE_SUM=$((REMOTE_SUM + ${r:-0}))
 done
@@ -206,7 +222,7 @@ echo "sum ${REMOTE_SUM}"
 
 echo "===== partition coverage and GT placement ====="
 if ! /tmp/check_remote "${PREFIX}" "${N}" "${DATA}/gt.bin" "${DIM}" \
-  | tee /tmp/check_remote.log; then
+  | tee "${LOG_DIR}/check_remote.log"; then
   echo "partition check failed"
   exit 1
 fi
@@ -219,23 +235,23 @@ if ! run_all search "${SEARCH_TIMEOUT}" "${ANNS_BIN}" \
 fi
 
 set +e
-stdbuf -oL -eL timeout --foreground 300 "${ANNS_BIN}" -m 0 \
+stdbuf -oL -eL timeout --foreground "${SINGLE_TIMEOUT}" "${ANNS_BIN}" -m 0 \
   --graph_type vamana "${COMMON[@]}" --app_type single "${QUERY[@]}" \
-  >/tmp/single.log 2>&1
+  >"${LOG_DIR}/single.log" 2>&1
 SINGLE_STATUS=$?
 set -e
 if [[ ${SINGLE_STATUS} -ne 0 ]]; then
   echo "single on the merged graph exited ${SINGLE_STATUS}"
-  tail -n 40 /tmp/single.log || true
+  tail -n 40 "${LOG_DIR}/single.log" || true
   exit 1
 fi
 
 echo "===== recall: ef scala_v3(all machines) single(merged graph) ====="
-join <(recall_rows /tmp/search.m0.log | sort -k1,1) \
-     <(recall_rows /tmp/single.log | sort -k1,1) | sort -n
+join <(recall_rows "${LOG_DIR}/search.m0.log" | sort -k1,1) \
+     <(recall_rows "${LOG_DIR}/single.log" | sort -k1,1) | sort -n
 
-SCALA_R=$(recall_at /tmp/search.m0.log "${CHECK_EF}") || SCALA_R=""
-SINGLE_R=$(recall_at /tmp/single.log "${CHECK_EF}") || SINGLE_R=""
+SCALA_R=$(recall_at "${LOG_DIR}/search.m0.log" "${CHECK_EF}") || SCALA_R=""
+SINGLE_R=$(recall_at "${LOG_DIR}/single.log" "${CHECK_EF}") || SINGLE_R=""
 if [[ -z "${SCALA_R}" || -z "${SINGLE_R}" ]]; then
   echo "no recall line at ef ${CHECK_EF}"
   exit 1

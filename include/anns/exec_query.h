@@ -573,7 +573,6 @@ static void test_vs_recall(
             res->profiler.report();
 #endif
 #endif
-            delete res;
             load_cnt.fetch_add(1);
             // printf("load_cnt ++: %u\n", load_cnt.load());
           }

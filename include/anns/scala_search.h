@@ -177,7 +177,7 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
     }
     
     global_query =
-        (QueryMsg<dist_t> **)new QueryMsg<dist_t> *[anns_param.qsize];
+        (QueryMsg<dist_t> **)new QueryMsg<dist_t> *[anns_param.qsize]();
     if (anns_param.app_type == SINGLE_MACHINE) {
       printf("Single machine baseline ...\n");
       graph_index.b1_graph->loadIndex();
@@ -495,6 +495,10 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
     printf("-------------- Overall COMM Info --------------\n");
     printf("Read: %.2f MB/s, %.2f num/s\n", read_sz_ps, read_num_ps);
     printf("Write: %.2f MB/s, %.2f num/s\n", write_sz_ps, write_num_ps);
+    printf(
+        "ReadBytes: %llu ReadCnt: %llu WriteBytes: %llu WriteCnt: %llu\n",
+        (unsigned long long)all_read_size, (unsigned long long)all_read_cnt,
+        (unsigned long long)all_write_size, (unsigned long long)all_write_cnt);
     printf("--------------------  End  --------------------\n");
   }
 
@@ -2007,7 +2011,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
 #endif
 
     for (uint32_t q = 0; q < query_num; q++) {
-      // Init query.
+      // Previous ef's objects stay until here. Recall accounting does not
+      // delete them: a second completion would free the same pointer twice.
+      delete global_query[q];
       global_query[q] = new QueryMsg<dist_t>(
           (char *)(query_data + (uint64_t)q * vec_size), vec_size, q, ef_,
           rdma_param.machine_id);
@@ -2026,6 +2032,7 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
       auto *tman = task_ma.getLocal();
       tman->clear();
 
+      delete[] tman->global_query;
       tman->global_query =
           (QueryMsg<dist_t> **)new QueryMsg<dist_t> *[anns_param.qsize];
       for (uint32_t q = 0; q < query_num; q++) {
@@ -2744,6 +2751,18 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
     co_yield true;
   }
 
+  // Count a finished query once. A second completion used to delete the
+  // same QueryMsg twice and corrupt the heap on the next allocation.
+  void take_query_result(
+      TaskManager<dist_t> &tman, std::vector<QueryMsg<dist_t> *> &ret,
+      uint32_t qid) {
+    QueryMsg<dist_t> *q = global_query[qid];
+    if (q->result_taken) return;
+    q->result_taken = true;
+    ret.push_back(q);
+    tman.cur_query_num--;
+  }
+
   void scala_sub_proc_v5(
       TaskManager<dist_t> &tman, std::vector<QueryMsg<dist_t> *> &ret) {
     auto &task_queue = tman.get_local_task_queue();
@@ -2809,8 +2828,7 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
 #ifdef PROFILER
           global_query[qid]->profiler.end("q_over_all");
 #endif
-          ret.push_back(global_query[qid]);
-          tman.cur_query_num--;
+          take_query_result(tman, ret, qid);
         }
       }
       query_queue.clear();
@@ -2945,10 +2963,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
           printf("local task\n");
 #endif
           // printf("local task from qid: %u\n", task.qid);
-          if (global_query[task.qid]->coro()) {
-            // query over. proc
-            ret.push_back(global_query[task.qid]);
-            tman.cur_query_num--;
+          if (!global_query[task.qid]->result_taken &&
+              global_query[task.qid]->coro()) {
+            take_query_result(tman, ret, task.qid);
           }
 
         } else {
@@ -3061,10 +3078,8 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
         global_query[q]->has_cur_async = true;
 
         // printf("local task from qid: %u\n", task.qid);
-        if (global_query[q]->coro()) {
-          // query over. proc
-          ret.push_back(global_query[q]);
-          tman.cur_query_num--;
+        if (!global_query[q]->result_taken && global_query[q]->coro()) {
+          take_query_result(tman, ret, q);
         }
       }
       async_queue.clear();
@@ -3092,10 +3107,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
           global_query[res_msg.qid]->cur_res = &res_msg;
           global_query[res_msg.qid]->has_cur_res = true;
           // printf("recv res.....\n");
-          if (global_query[res_msg.qid]->coro()) {
-            // query over. proc
-            ret.push_back(global_query[res_msg.qid]);
-            tman.cur_query_num--;
+          if (!global_query[res_msg.qid]->result_taken &&
+              global_query[res_msg.qid]->coro()) {
+            take_query_result(tman, ret, res_msg.qid);
           }
         } else {
           // printf("push q%u POST STAGE local res\n", res_msg.qid);
@@ -3129,9 +3143,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
       m_profiler.start("g_subquery_Q");
 #endif
       for (uint32_t &sqid : subquery_queue) {
-        if (global_query[sqid]->coro()) {
-          ret.push_back(global_query[sqid]);
-          tman.cur_query_num--;
+        if (!global_query[sqid]->result_taken &&
+            global_query[sqid]->coro()) {
+          take_query_result(tman, ret, sqid);
         }
       }
       subquery_queue.clear();

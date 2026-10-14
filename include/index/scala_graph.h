@@ -79,7 +79,7 @@ class ScalaGraphIndex {
     partition_id = index_param.machine_id;
     partition_vec_num = (uint32_t *)malloc(sizeof(uint32_t) * partition_num);
     cumu_partition_num =
-        (uint32_t *)malloc(sizeof(uint32_t) * partition_num + 1);
+        (uint32_t *)malloc(sizeof(uint32_t) * (partition_num + 1));
     subset_size_milllions = index_param.subset_size_milllions;
   }
 

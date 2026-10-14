@@ -1,6 +1,10 @@
 #!/bin/bash
-# Compile and run the synthetic scalagraph_v3 / scala_v3 path in Docker.
+# Compile and run scalagraph_v3 / scala_v3 in Docker.
 # The host needs Docker and the rdma_rxe module. MACHINE_NUM defaults to 2.
+# DATA_DIR, when set, is a prepared dataset mounted read-only; DATA_MOUNT is
+# an extra host path that files inside DATA_DIR may symlink to. HOST_LOG and
+# HOST_WORK receive /logs and /work. SEARCH_TIMEOUT, INDEX_TIMEOUT, and
+# SINGLE_TIMEOUT are passed through when set.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -9,10 +13,30 @@ docker build -t cotra-softroce \
   -f "${ROOT}/scripts/softroce/Dockerfile" \
   "${ROOT}/scripts/softroce"
 
-docker run --rm --privileged --network host \
-  --ulimit memlock=-1:-1 \
-  -e MACHINE_NUM="${MACHINE_NUM:-2}" \
-  -v /lib/modules:/lib/modules:ro \
-  -v "${ROOT}":/src:ro \
-  cotra-softroce \
-  bash /src/scripts/softroce/e2e.sh
+run=(docker run --rm --privileged --network host --ulimit memlock=-1:-1)
+run+=(-e "MACHINE_NUM=${MACHINE_NUM:-2}")
+run+=(-v /lib/modules:/lib/modules:ro)
+run+=(-v "${ROOT}":/src:ro)
+
+for name in SAMPLE_PERCENT SEARCH_TIMEOUT INDEX_TIMEOUT SINGLE_TIMEOUT DATA_DIR; do
+  if [[ -n "${!name:-}" ]]; then
+    run+=(-e "${name}=${!name}")
+  fi
+done
+if [[ -n "${DATA_DIR:-}" ]]; then
+  run+=(-v "${DATA_DIR}:${DATA_DIR}:ro")
+fi
+if [[ -n "${DATA_MOUNT:-}" ]]; then
+  run+=(-v "${DATA_MOUNT}:${DATA_MOUNT}:ro")
+fi
+if [[ -n "${HOST_LOG:-}" ]]; then
+  mkdir -p "${HOST_LOG}"
+  run+=(-v "${HOST_LOG}:/logs" -e LOG_DIR=/logs)
+fi
+if [[ -n "${HOST_WORK:-}" ]]; then
+  mkdir -p "${HOST_WORK}"
+  run+=(-v "${HOST_WORK}:/work" -e WORKDIR=/work)
+fi
+
+run+=(cotra-softroce bash /src/scripts/softroce/e2e.sh)
+"${run[@]}"
