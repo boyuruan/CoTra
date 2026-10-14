@@ -170,6 +170,8 @@ struct ResultMsg {
   uint32_t qid;
   uint8_t core_cnt;
   uint8_t nocore_cnt;
+  // Local only, not serialized: converted from a NodeResult.
+  uint8_t from_node{0};
   std::vector<std::pair<dist_t, uint32_t>> res;
 
   ResultMsg(uint32_t _qid, uint8_t _core_cnt = 1, uint8_t _nocore_cnt = 0) : 

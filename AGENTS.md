@@ -61,7 +61,14 @@ recall and the RDMA READ/WRITE byte and operation counts.
   are cleared at the start of that ef. The `MB/s` line divides `bytes >> 20`
  by time, so a total under 1 MiB prints as 0.00. Record `ReadBytes`,
  `ReadCnt`, `WriteBytes`, and `WriteCnt`, summed across machines. WRITE
- includes task, result, and release messages. `DEBUG`, `PROFILER`, `LAT`,
+ includes task, result, and release messages. The block also prints
+ `WriteType:` bytes and posts per `ControlType`, and one `Chan:` line per
+ path that brings an exact distance from another machine (`READ`, `MICRO`
+ for inline ids sent to a core machine, `RESULT`, `NODE_RESULT`): entries
+ delivered, already visited on arrival, accepted as candidates, and dropped
+ by the PQ gate. `scripts/softroce/comm_table.py LOG_DIR N --types --chan
+ --at R,...` sums the blocks per ef and interpolates the four totals at a
+ recall. `DEBUG`, `PROFILER`, `LAT`,
   and `PROF_*` stay off: several change the workload (`DEBUG` runs 5-20
   queries, `PROF_Q_DISTRI` runs 3, the `PROF_*_DISTRI` macros fix `ef` to
   300). Do not commit those enabled, and do not compare numbers produced
@@ -110,6 +117,24 @@ against 1.0. At 4P, `scala_v3` sits below `single` through the middle of the
 ef sweep and the two meet from ef 150. At 2P, `scala_v3` was at least
 `single` at every ef. Read a mid-ef gap on 4P against that shape.
 
+`e2e.sh` also runs experiments on an index that already exists:
+`SKIP_INDEX=1` searches the index in `WORKDIR`, `SKIP_SINGLE=1` skips
+`single` and the pass rule, `SEARCH_ARGS` is appended to the `scala_v3`
+command, and `BUILD_DIR` keeps a build across containers. `PQ_CHUNKS` and
+`PQ_TAU` turn on the PQ gate below. `docker_e2e.sh` passes these through.
+
+The PQ gate (`--pq_prefix`, `--pq_tau`, `include/anns/pq_codes.h`) keeps
+PQ codes of every base vector on every machine. `tests/index/pq_encode`
+writes them from `base.bin` with vendored DiskANN; the training sample is
+random, so a re-encode gives different codes. When top-ef is full, an
+inline neighbor on another machine whose PQ distance exceeds
+`lowerBound * (1 + tau)` is not READ or sent to its core machine. A
+negative tau counts those neighbors and sends them anyway. Out-of-line
+groups and the node-expansion path are not gated: the first carry only an
+offset, the second has no lower bound. Every machine holds 1 byte per chunk
+per base vector, so the codes grow with the dataset, not the partition.
+Compare a gated run with the baseline at the same recall, not the same ef.
+
 `ef` below `k` is raised to `k` (`ef = max(ef, k)` in `scala_search.h`). With
 `k` 10, the printed rows for ef 3 through 9 all searched at ef 10.
 `scala_v3` moves between runs on those rows. `single` does not. Compare them
@@ -147,7 +172,8 @@ you replace that liveness guarantee.
 - `scripts/`: cluster configs (`*.conf`) and experiment scripts named
   `scripts/<dataset>/<N>M_<P>P_<variant>_{index,anns}.sh`.
 - `scripts/softroce/`: the container, `gen_synth.cc`, `check_remote.cc`,
- `e2e.sh`, `docker_e2e.sh`, and `docker_test_read.sh`.
+ `e2e.sh`, `docker_e2e.sh`, `docker_test_read.sh`, `comm_table.py`, and
+ `sift1m_4p.txt` (recorded SIFT1M 4P tables).
 
 ## How a run works
 
@@ -237,6 +263,13 @@ parser.
   in `dispatch_kmeans_query_start`. Most `*_Kshnot_anns.sh` scripts pass
   `shared_nothing` (only `deep/100M_16P_*` pass `Kshared_nothing`), and
   `sift/10M_16P_Kshnot_anns.sh` and `deep/10M_16P_Kshnot_anns.sh` run plain `b2`.
+- **The owner of a TASK keeps results by an inverted test.** The issuer
+ sets `ef_fill = top_candidates.size() < ef` (still filling); the owner
+ keeps a distance when `!task.ef_fill || dist < task.lower_bound`. After
+ the pre-stage top-ef is full, so out-of-line results come back
+ unfiltered: on SIFT1M 4P at ef 100, 6848 of 154390 RESULT entries were
+ accepted. The issuer re-tests every entry, so recall does not depend on
+ it; RESULT bytes do.
 - `README.md` documents `--dist_fn ip`; the code accepts only `l2` and `mips`
   (plus `cosine` at build time).
 - `--app_type b2kmeans` parses, but `test_vs_recall` has no case for it, so it

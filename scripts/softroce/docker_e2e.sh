@@ -3,8 +3,9 @@
 # The host needs Docker and the rdma_rxe module. MACHINE_NUM defaults to 2.
 # DATA_DIR, when set, is a prepared dataset mounted read-only; DATA_MOUNT is
 # an extra host path that files inside DATA_DIR may symlink to. HOST_LOG and
-# HOST_WORK receive /logs and /work. SEARCH_TIMEOUT, INDEX_TIMEOUT, and
-# SINGLE_TIMEOUT are passed through when set.
+# HOST_WORK receive /logs and /work. SEARCH_TIMEOUT, INDEX_TIMEOUT,
+# SINGLE_TIMEOUT, SKIP_INDEX, SKIP_SINGLE, SEARCH_ARGS, BUILD_DIR, PQ_CHUNKS,
+# and PQ_TAU are passed through when set (see e2e.sh).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -18,7 +19,8 @@ run+=(-e "MACHINE_NUM=${MACHINE_NUM:-2}")
 run+=(-v /lib/modules:/lib/modules:ro)
 run+=(-v "${ROOT}":/src:ro)
 
-for name in SAMPLE_PERCENT SEARCH_TIMEOUT INDEX_TIMEOUT SINGLE_TIMEOUT DATA_DIR; do
+for name in SAMPLE_PERCENT SEARCH_TIMEOUT INDEX_TIMEOUT SINGLE_TIMEOUT DATA_DIR \
+  SKIP_INDEX SKIP_SINGLE SEARCH_ARGS BUILD_DIR PQ_CHUNKS PQ_TAU; do
   if [[ -n "${!name:-}" ]]; then
     run+=(-e "${name}=${!name}")
   fi

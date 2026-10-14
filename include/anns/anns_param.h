@@ -212,6 +212,12 @@ class AnnsParameter {
 
   std::string evaluation_save_path;  // evaluation save path
 
+  // scala_v3 PQ gate: <pq_prefix>_pivots.bin and _codes.bin. Empty: off.
+  // pq_tau >= 0 drops when PQ distance > lowerBound * (1 + pq_tau);
+  // pq_tau < 0 only counts those neighbors.
+  std::string pq_prefix;
+  float pq_tau;
+
   // char *massb;
   // unsigned char *mass;
   char *query_ptr;

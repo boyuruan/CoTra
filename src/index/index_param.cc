@@ -70,6 +70,14 @@ AnnsParameter::AnnsParameter(int argc, char **argv, IndexParameter &index_param)
     
     optional_configs.add_options()(
         "scala_v3", po::bool_switch()->default_value(false), "Search version");
+    optional_configs.add_options()(
+        "pq_prefix", po::value<std::string>(&pq_prefix)->default_value(""),
+        "scala_v3: PQ files <prefix>_pivots.bin and <prefix>_codes.bin; "
+        "empty disables the PQ gate.");
+    optional_configs.add_options()(
+        "pq_tau", po::value<float>(&pq_tau)->default_value(0.0f),
+        "scala_v3: skip an inline remote neighbor when its PQ distance "
+        "exceeds lowerBound * (1 + pq_tau). Negative: count only.");
     // Merge required and optional parameters
     desc.add(required_configs).add(optional_configs);
     

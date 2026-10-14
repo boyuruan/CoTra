@@ -1069,6 +1069,8 @@ int RdmaCommunication::post_write_send(
 #ifdef COMM_PROFILE
   ctx->write_size += size;
   ctx->write_cnt++;
+  ctx->type_write_size[control] += size;
+  ctx->type_write_cnt[control]++;
 #endif
   if (size > MAX_QUERYBUFFER_SIZE) {
     printf("Error: Exceed the max write buffer size.\n");

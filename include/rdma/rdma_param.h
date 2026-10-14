@@ -115,6 +115,12 @@ typedef enum {
   CLEAR
 } ControlType;
 
+// scala_v3 paths that bring an exact distance from another machine.
+// CH_READ: inline neighbor on a non-core machine, fetched by RDMA READ.
+// CH_MICRO: inline neighbor id sent to a core machine in SYNC/NODE_SYNC.
+// CH_RESULT, CH_NODE_RESULT: distances returned for a TASK / node task.
+typedef enum { CH_READ, CH_MICRO, CH_RESULT, CH_NODE_RESULT, CH_NUM } CommChannel;
+
 class RdmaParameter {
  public:
   int port;

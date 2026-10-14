@@ -171,3 +171,52 @@ machine 3
 500	10042240	73840	41858977	91385
 600	11447800	84175	48291637	102846
 700	12091216	88906	59916279	122388
+
+PQ gate on inline remote neighbors, same index and flags, 2026-10-14.
+Every machine holds PQ codes of all 1M base vectors (tests/index/pq_encode,
+256 centers, 100k random training sample). With top-ef full, an inline
+neighbor on another machine (group size <= INLINE_DEG_BAR) is not READ
+from a non-core machine, or sent to a core machine, when its PQ distance
+exceeds lowerBound * (1 + tau). Survivors still get the exact distance.
+Out-of-line groups and node-expansion tasks are not gated.
+Runs: base (no PQ), shadow (PQ32 loaded, tau < 0, counts only),
+pq32 (32 B/vector, tau 0), pq16 (16 B/vector, tau 0).
+Logs: tmp/sift1m-4p/logs/{pq-base,pq32-shadow,pq32-tau0,pq16-tau0}/
+Tables: python3 scripts/softroce/comm_table.py <log dir> 4 --types --chan --at ...
+
+Where the baseline traffic goes, ef 100, summed over machines.
+READ (inline neighbors on non-core machines): 14.08 MB / 103547.
+WRITE by type: QUERY 18.91 MB / 16953, SYNC 10.79 MB / 42209,
+TASK 2.07 MB / 38618, RESULT 1.68 MB / 4975, NODE_RESULT 1.06 MB / 4567,
+NODE_SYNC 0.52 MB / 4542, RELEASE 0.45 MB / 874.
+Delivered entries accepted as candidates: READ 10502 of 103547 (11354
+already visited), inline core ids 10765 of 183600 (73802 already visited),
+RESULT 6848 of 154390, NODE_RESULT 6454 of 99850.
+The shadow run would drop 85762 of 103517 READs at tau 0.
+
+Recall per ef. shadow against base is the run-to-run spread (<= 0.0005).
+ef	base	shadow	pq32	pq16	base_read_cnt	pq32_read_cnt	pq16_read_cnt	base_write_bytes	pq32_write_bytes	pq16_write_bytes
+10	0.60266	0.60272	0.60207	0.60171	26752	3066	3090	9836668	9744972	9742837
+15	0.66773	0.66791	0.66680	0.66719	30177	3786	3750	11278301	11163485	11158936
+20	0.71425	0.71473	0.71434	0.71351	38771	5634	5700	12703380	12577050	12556775
+30	0.77370	0.77361	0.77392	0.77311	44856	6722	6927	15519013	15339092	15281421
+40	0.81326	0.81336	0.81305	0.81325	55451	8896	9076	18283257	18080719	18039798
+50	0.84209	0.84174	0.84190	0.84098	62026	9999	10169	21122978	20862578	20813822
+70	0.87953	0.87942	0.87950	0.87944	78215	12959	13224	26804187	26427649	26439673
+100	0.91372	0.91336	0.91358	0.91338	103547	17750	18110	35494966	35009651	34986013
+150	0.94287	0.94285	0.94274	0.94301	138438	23744	24493	50182982	49353950	49263626
+200	0.95841	0.95872	0.95848	0.95845	174563	30074	30994	64898970	63876993	63839312
+250	0.96799	0.96776	0.96793	0.96776	206314	35718	36828	80023201	78697205	78790149
+300	0.97426	0.97423	0.97420	0.97405	238956	41162	42438	95371210	93752086	93755939
+400	0.98164	0.98177	0.98169	0.98159	295093	50691	52527	126002537	124258539	123830052
+500	0.98576	0.98570	0.98559	0.98556	343944	58014	60305	156937287	154947207	154306882
+600	0.98857	0.98840	0.98876	0.98849	393018	65762	68726	188769097	185614982	185594433
+700	0.99049	0.99050	0.99047	0.99050	432220	71935	74835	221300942	217060715	217178266
+
+Total READ+WRITE at the same recall, linear in recall between ef rows.
+recall	base_MB	pq32_MB	pq16_MB	base_ops	pq32_ops	pq16_ops
+0.90	44.7	33.7 (-24.5%)	33.8 (-24.4%)	198.4K	120.5K (-39.3%)	120.6K (-39.2%)
+0.95	78.0	59.7 (-23.5%)	59.6 (-23.6%)	310.7K	181.6K (-41.6%)	181.9K (-41.5%)
+0.98	157.6	124.0 (-21.4%)	124.3 (-21.1%)	557.5K	322.8K (-42.1%)	324.1K (-41.9%)
+READ posts fall 82-84%; WRITE bytes fall 1-2%. After the gate (pq32,
+ef 100), QUERY 18.91 MB and SYNC 10.36 MB are 78% of the 37.42 MB left.

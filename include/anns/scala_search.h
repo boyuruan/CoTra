@@ -315,12 +315,53 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
         anns_param.app_type == ScalaANN_v3) {
       printf("ScalaGraph init ...\n");
       graph_index.scala_graph->load_index();
+      if (!anns_param.pq_prefix.empty()) init_pq_gate();
       run_rdma();
     } else {
       printf("Unrecogenized App Type.\n");
       abort();
     }
     printf("Init over ...\n");
+  }
+
+  PQCodes pq_codes;
+
+  void init_pq_gate() {
+    ScalaGraphIndex *g = graph_index.scala_graph;
+    pq_codes.load(
+        anns_param.pq_prefix, anns_param.data_type_str,
+        g->kmeans_pos_label_map, g->all_vec_num);
+    if (pq_codes.dim != anns_param.vecdim) {
+      fprintf(
+          stderr, "PQ dim %u does not match data dim %zu\n", pq_codes.dim,
+          anns_param.vecdim);
+      abort();
+    }
+    // A local vector should be far closer to its own code than to another
+    // vector's. If not, the codes are not in this graph's pos order.
+    std::mt19937 rng(1);
+    double own = 0, other = 0;
+    uint32_t n = std::min<uint32_t>(1000, g->local_part_vec_num);
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t local = rng() % g->local_part_vec_num;
+      const char *vec = g->vector_ptr + (size_t)local * data_label_size;
+      own += pq_codes.dist(vec, g->partition_ofs + local);
+      other += pq_codes.dist(vec, rng() % g->all_vec_num);
+    }
+    printf(
+        "PQ self-check over %u local vectors: own code %.1f, random code "
+        "%.1f\n",
+        n, own / n, other / n);
+    if (own >= 0.5 * other) {
+      fprintf(stderr, "PQ codes do not match the graph's vector order\n");
+      abort();
+    }
+    g->pq = &pq_codes;
+    g->pq_shadow = anns_param.pq_tau < 0;
+    g->pq_scale = 1.0f + std::max(0.0f, anns_param.pq_tau);
+    printf(
+        "PQ gate on inline remote neighbors: tau %.3f%s\n", anns_param.pq_tau,
+        g->pq_shadow ? " (shadow: count only)" : "");
   }
 
   // For reorder test only [TEMP]
@@ -480,6 +521,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
     uint64_t all_write_size = 0;
     uint64_t all_read_cnt = 0;
     uint64_t all_write_cnt = 0;
+    uint64_t type_size[CLEAR + 1] = {0}, type_cnt[CLEAR + 1] = {0};
+    uint64_t deliv[CH_NUM] = {0}, dup[CH_NUM] = {0}, pass[CH_NUM] = {0};
+    uint64_t gated[CH_NUM] = {0};
 
     for (uint32_t t = 0; t < getActiveThreads(); ++t) {
       auto *ctx = rdma_comm.rdma_ctx.getRemote(t);
@@ -487,6 +531,16 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
       all_write_size += ctx->write_size;
       all_read_cnt += ctx->read_cnt;
       all_write_cnt += ctx->write_cnt;
+      for (int c = 0; c <= CLEAR; c++) {
+        type_size[c] += ctx->type_write_size[c];
+        type_cnt[c] += ctx->type_write_cnt[c];
+      }
+      for (int c = 0; c < CH_NUM; c++) {
+        deliv[c] += ctx->chan_deliv[c];
+        dup[c] += ctx->chan_dup[c];
+        pass[c] += ctx->chan_pass[c];
+        gated[c] += ctx->chan_gated[c];
+      }
     }
     float read_sz_ps = 1000000.0 * (all_read_size >> 20) / time;
     float read_num_ps = 1000000.0 * all_read_cnt / time;
@@ -499,6 +553,27 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
         "ReadBytes: %llu ReadCnt: %llu WriteBytes: %llu WriteCnt: %llu\n",
         (unsigned long long)all_read_size, (unsigned long long)all_read_cnt,
         (unsigned long long)all_write_size, (unsigned long long)all_write_cnt);
+    static const char *type_name[CLEAR + 1] = {
+        "B2_START", "B2_END",    "PART_INFO",   "BUILD_SYNC",  "DISPATCH_META",
+        "DISPATCH_ID", "DISPATCH_NGH", "SCALA_META", "SCALA_NGH", "TASK",
+        "RESULT",   "NODE_RESULT", "NODE_SYNC", "COMPUTE",     "QUERY",
+        "CORE_INFO", "SCHEDULE",  "SYNC",        "RELEASE",     "TERMINATION",
+        "CLEAR"};
+    for (int c = 0; c <= CLEAR; c++) {
+      if (type_cnt[c] == 0) continue;
+      printf(
+          "WriteType: %s Bytes: %llu Cnt: %llu\n", type_name[c],
+          (unsigned long long)type_size[c], (unsigned long long)type_cnt[c]);
+    }
+    static const char *chan_name[CH_NUM] = {
+        "READ", "MICRO", "RESULT", "NODE_RESULT"};
+    for (int c = 0; c < CH_NUM; c++) {
+      printf(
+          "Chan: %s Deliv: %llu Dup: %llu Pass: %llu Gated: %llu\n",
+          chan_name[c], (unsigned long long)deliv[c],
+          (unsigned long long)dup[c], (unsigned long long)pass[c],
+          (unsigned long long)gated[c]);
+    }
     printf("--------------------  End  --------------------\n");
   }
 
@@ -2147,7 +2222,7 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
       }
     };
 
-    auto post_proc_candidate = [&](dist_t dist, uint32_t candidate_id) {
+    auto post_proc_candidate = [&](dist_t dist, uint32_t candidate_id) -> bool {
       bool flag_consider_candidate =
           global_query[query_id]->top_candidates.size() <
               global_query[query_id]->ef ||
@@ -2174,7 +2249,12 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
           global_query[query_id]->lowerBound =
               global_query[query_id]->top_candidates.top().first;
       }
+      return flag_consider_candidate;
     };
+
+#ifdef COMM_PROFILE
+    RdmaContext *comm_ctx = rdma_comm.rdma_ctx.getLocal();
+#endif
 
     std::pair<dist_t, uint32_t> group_nodes[CAND_GROUP_SIZE];
     if (global_query[query_id]->is_new) {
@@ -2404,9 +2484,15 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
                 post_cnt++;
               } else {
                 // local node.
+#ifdef COMM_PROFILE
+                uint64_t *gated = comm_ctx->chan_gated;
+#else
+                uint64_t *gated = nullptr;
+#endif
                 post_cnt += graph_index.scala_graph
                                 ->scala_graph_v3_get_subquery_task_lb(
-                                    ngh_id, query_id, tman, ba_task_queue);
+                                    ngh_id, query_id, tman, ba_task_queue,
+                                    gated);
               }
             }
 #ifdef DEBUG
@@ -2571,6 +2657,9 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
                              part_ofs) *
                                 data_label_size,
                   _MM_HINT_T0);
+#ifdef COMM_PROFILE
+              comm_ctx->chan_deliv[CH_MICRO]++;
+#endif
               if (!global_query[query_id]->visit_hash.CheckAndSet(vid)) {
 #ifdef PROF_COMPUTATION
                 computation_cnt ++;
@@ -2578,7 +2667,14 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
                 char *vec_data = vec_ptr + (vid - part_ofs) * data_label_size;
                 dist_t dist = fstdistfunc_(
                     global_query[query_id]->vector, vec_data, dist_func_param_);
-                post_proc_candidate(dist, vid);
+                bool took = post_proc_candidate(dist, vid);
+#ifdef COMM_PROFILE
+                comm_ctx->chan_pass[CH_MICRO] += took;
+#endif
+              } else {
+#ifdef COMM_PROFILE
+                comm_ctx->chan_dup[CH_MICRO]++;
+#endif
               }
             }
             global_query[query_id]->local_micro_task.clear();
@@ -2600,13 +2696,23 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
               char *vec_ptr = r.buffer_ptr;
               // printf("proc ngh_id: %u bufid: %u\n", ngh_id, r.buffer_id);
               _mm_prefetch(vec_ptr, _MM_HINT_T0);
+#ifdef COMM_PROFILE
+              comm_ctx->chan_deliv[CH_READ]++;
+#endif
               if (!global_query[query_id]->visit_hash.CheckAndSet(ngh_id)) {
 #ifdef PROF_COMPUTATION
                 computation_cnt ++;
 #endif
                 dist_t dist = fstdistfunc_(
                     global_query[query_id]->vector, vec_ptr, dist_func_param_);
-                post_proc_candidate(dist, ngh_id);
+                bool took = post_proc_candidate(dist, ngh_id);
+#ifdef COMM_PROFILE
+                comm_ctx->chan_pass[CH_READ] += took;
+#endif
+              } else {
+#ifdef COMM_PROFILE
+                comm_ctx->chan_dup[CH_READ]++;
+#endif
               }
               rdma_comm.release_cache(r.buffer_id);
               // free(r);
@@ -2641,7 +2747,12 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
               for (std::pair<dist_t, uint32_t> &r : result.res) {
                 dist_t dist = r.first;
                 uint32_t candidate_id = r.second;
-                post_proc_candidate(dist, candidate_id);
+                bool took = post_proc_candidate(dist, candidate_id);
+#ifdef COMM_PROFILE
+                int ch = result.from_node ? CH_NODE_RESULT : CH_RESULT;
+                comm_ctx->chan_deliv[ch]++;
+                comm_ctx->chan_pass[ch] += took;
+#endif
               }
               // count the res from core and nocore result.
               recv_cnt += result.core_cnt;
@@ -2931,6 +3042,7 @@ class ScalaSearch : public AlgorithmInterface<dist_t> {
         // TODO: can polish here.
         ResultMsg<dist_t> tmp_res_msg(res_msg.qid);
         tmp_res_msg.res = res_msg.res;
+        tmp_res_msg.from_node = 1;
         // Add new post count number.
 
         global_query[res_msg.qid]->nocore_post += res_msg.post_cnt;

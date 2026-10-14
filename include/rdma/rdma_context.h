@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 
+#include <cstring>
+
 #include "anns/vec_buffer.h"
 #include "rdma_param.h"
 
@@ -37,6 +39,12 @@ class RdmaContext {
 
   uint64_t read_size, read_cnt;  // bytes, number
   uint64_t write_size, write_cnt;
+  uint64_t type_write_size[CLEAR + 1], type_write_cnt[CLEAR + 1];
+  // Neighbors whose exact distance needs another machine, per channel:
+  // delivered, already visited on arrival, accepted as candidate, and
+  // dropped by the PQ gate before they were sent.
+  uint64_t chan_deliv[CH_NUM], chan_dup[CH_NUM], chan_pass[CH_NUM];
+  uint64_t chan_gated[CH_NUM];
 
   MessageContext local_mr_msg[MACHINE_NUM];
   MessageContext remote_mr_msg[MACHINE_NUM];
@@ -106,6 +114,12 @@ class RdmaContext {
   void clear_size_cnt() {
     read_size = read_cnt = 0;
     write_size = write_cnt = 0;
+    memset(type_write_size, 0, sizeof(type_write_size));
+    memset(type_write_cnt, 0, sizeof(type_write_cnt));
+    memset(chan_deliv, 0, sizeof(chan_deliv));
+    memset(chan_dup, 0, sizeof(chan_dup));
+    memset(chan_pass, 0, sizeof(chan_pass));
+    memset(chan_gated, 0, sizeof(chan_gated));
   }
 
   enum ibv_mtu set_mtu(uint8_t ib_port, int user_mtu);

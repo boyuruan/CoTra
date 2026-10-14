@@ -6,6 +6,11 @@
 # ("npts dim nq k", k is res_knn). The index goes to WORKDIR and logs to
 # LOG_DIR, so DATA_DIR can be read-only. Expects the repo at /src,
 # --privileged, --network host, and the host /lib/modules.
+# SKIP_INDEX=1 searches the index already in WORKDIR. SKIP_SINGLE=1 skips
+# the single reference and the pass rule. SEARCH_ARGS is appended to the
+# scala_v3 command line. BUILD_DIR keeps the build across containers.
+# PQ_CHUNKS > 0 encodes base.bin into WORKDIR/pq<chunks> once and turns on
+# the scala_v3 PQ gate with PQ_TAU (negative: count only).
 set -euo pipefail
 
 N=${MACHINE_NUM:-2}
@@ -13,11 +18,16 @@ SAMPLE_PERCENT=${SAMPLE_PERCENT:-0.01}
 SEARCH_TIMEOUT=${SEARCH_TIMEOUT:-300}
 INDEX_TIMEOUT=${INDEX_TIMEOUT:-300}
 SINGLE_TIMEOUT=${SINGLE_TIMEOUT:-300}
+SKIP_INDEX=${SKIP_INDEX:-0}
+SKIP_SINGLE=${SKIP_SINGLE:-0}
+PQ_CHUNKS=${PQ_CHUNKS:-0}
+PQ_TAU=${PQ_TAU:-0}
+read -ra EXTRA_SEARCH <<< "${SEARCH_ARGS:-}"
 LOG_DIR=${LOG_DIR:-/tmp}
 WORKDIR=${WORKDIR:-/tmp/cotra-work-${N}}
 CONF=/tmp/ip_local_${N}.conf
 PORT=21211
-BUILD=/tmp/cotra-build-${N}
+BUILD=${BUILD_DIR:-/tmp/cotra-build-${N}}
 DATA=${DATA_DIR:-/tmp/cotra-synth}
 PREFIX=${WORKDIR}/merged
 INDEX_BIN=${BUILD}/tests/scala_index
@@ -171,11 +181,27 @@ if ! cmake -S /src -B "${BUILD}" -DCOTRA_WITH_INDEX=ON -DMACHINE_NUM="${N}" \
   tail -n 80 "${LOG_DIR}/cmake-cfg.log" || true
   exit 1
 fi
-if ! cmake --build "${BUILD}" -j "$(nproc)" --target scala_index scala_anns \
+TARGETS=(scala_index scala_anns)
+if (( PQ_CHUNKS > 0 )); then TARGETS+=(pq_encode); fi
+if ! cmake --build "${BUILD}" -j "$(nproc)" --target "${TARGETS[@]}" \
   >"${LOG_DIR}/cmake-build.log" 2>&1; then
   echo "cmake build failed"
   tail -n 80 "${LOG_DIR}/cmake-build.log" || true
   exit 1
+fi
+
+if (( PQ_CHUNKS > 0 )); then
+  PQ_PREFIX=${WORKDIR}/pq${PQ_CHUNKS}
+  if [[ ! -f "${PQ_PREFIX}_codes.bin" ]]; then
+    if ! "${BUILD}/tests/index/pq_encode" uint8 "${DATA}/base.bin" \
+      "${PQ_PREFIX}" "${PQ_CHUNKS}" >"${LOG_DIR}/pq_encode.log" 2>&1; then
+      echo "pq_encode failed"
+      tail -n 40 "${LOG_DIR}/pq_encode.log" || true
+      exit 1
+    fi
+  fi
+  echo "PQ gate: ${PQ_PREFIX}, tau ${PQ_TAU}"
+  EXTRA_SEARCH+=(--pq_prefix "${PQ_PREFIX}" --pq_tau "${PQ_TAU}")
 fi
 
 link_rxe
@@ -205,20 +231,25 @@ QUERY=(
   -Q "${NQ}"
 )
 
-if ! run_all index "${INDEX_TIMEOUT}" "${INDEX_BIN}" --graph_type scalagraph_v3 \
-  "${COMMON[@]}"; then
-  echo "soft-roce synthetic index build failed"
-  exit 1
-fi
+if [[ ${SKIP_INDEX} -eq 1 ]]; then
+  echo "===== reusing the index in ${WORKDIR} ====="
+else
+  if ! run_all index "${INDEX_TIMEOUT}" "${INDEX_BIN}" \
+    --graph_type scalagraph_v3 "${COMMON[@]}"; then
+    echo "soft-roce synthetic index build failed"
+    exit 1
+  fi
 
-echo "===== out-of-line remote neighbor ids per machine ====="
-REMOTE_SUM=0
-for ((m = 0; m < N; m++)); do
-  r=$(awk '/^all_in_remote_ngh_num:/ { print $2 }' "${LOG_DIR}/index.m${m}.log")
-  echo "m${m} all_in_remote_ngh_num ${r:-missing}"
-  REMOTE_SUM=$((REMOTE_SUM + ${r:-0}))
-done
-echo "sum ${REMOTE_SUM}"
+  echo "===== out-of-line remote neighbor ids per machine ====="
+  REMOTE_SUM=0
+  for ((m = 0; m < N; m++)); do
+    r=$(awk '/^all_in_remote_ngh_num:/ { print $2 }' \
+      "${LOG_DIR}/index.m${m}.log")
+    echo "m${m} all_in_remote_ngh_num ${r:-missing}"
+    REMOTE_SUM=$((REMOTE_SUM + ${r:-0}))
+  done
+  echo "sum ${REMOTE_SUM}"
+fi
 
 echo "===== partition coverage and GT placement ====="
 if ! /tmp/check_remote "${PREFIX}" "${N}" "${DATA}/gt.bin" "${DIM}" \
@@ -229,9 +260,16 @@ fi
 
 if ! run_all search "${SEARCH_TIMEOUT}" "${ANNS_BIN}" \
   --graph_type scalagraph_v3 "${COMMON[@]}" --app_type scala_v3 \
-  "${QUERY[@]}"; then
+  "${QUERY[@]}" "${EXTRA_SEARCH[@]}"; then
   echo "soft-roce synthetic search failed"
   exit 1
+fi
+
+if [[ ${SKIP_SINGLE} -eq 1 ]]; then
+  echo "===== recall: ef scala_v3(all machines) ====="
+  recall_rows "${LOG_DIR}/search.m0.log"
+  echo "search finished; single and the pass rule were skipped"
+  exit 0
 fi
 
 set +e
@@ -257,7 +295,7 @@ if [[ -z "${SCALA_R}" || -z "${SINGLE_R}" ]]; then
   exit 1
 fi
 echo "ef ${CHECK_EF}: scala_v3 ${SCALA_R} single ${SINGLE_R}"
-if (( N > 2 && REMOTE_SUM == 0 )); then
+if (( SKIP_INDEX == 0 && N > 2 && REMOTE_SUM == 0 )); then
   echo "no out-of-line remote neighbor ids"
   exit 1
 fi

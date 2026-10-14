@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "anns/anns_param.h"
+#include "anns/pq_codes.h"
 #include "anns/task_manager.h"
 #include "index/index_param.h"
 #include "vamana/vamana.h"
@@ -73,6 +74,13 @@ class ScalaGraphIndex {
   uint64_t remote_ngh_num;
 
   int *kmeans_label_pos_map, *kmeans_pos_label_map;
+
+  // PQ gate on inline neighbors held by another machine. With pq set and
+  // top-ef full, a neighbor whose PQ distance exceeds lowerBound * pq_scale
+  // is not sent. pq_shadow counts those neighbors and sends them anyway.
+  const PQCodes *pq{nullptr};
+  float pq_scale{1.0f};
+  bool pq_shadow{false};
 
   ScalaGraphIndex(IndexParameter &_index_param) : index_param(_index_param) {
     partition_num = index_param.num_parts;
@@ -398,7 +406,7 @@ class ScalaGraphIndex {
   template <typename dist_t>
   uint32_t scala_graph_v3_get_subquery_task_lb(
       uint32_t current_node_id, uint32_t query_id, TaskManager<dist_t> &tman,
-      BalanceQueue<ComputeTask<dist_t>> &ib) {
+      BalanceQueue<ComputeTask<dist_t>> &ib, uint64_t *gated = nullptr) {
     if (current_node_id < partition_ofs ||
         current_node_id >= partition_ofs + local_part_vec_num) {
       printf(
@@ -413,6 +421,15 @@ class ScalaGraphIndex {
     uint8_t ef_fill =
         (tman.global_query[query_id]->top_candidates.size() <
          tman.global_query[query_id]->ef);
+
+    const char *qvec = tman.global_query[query_id]->vector;
+    float pq_bound = (float)lb * pq_scale;
+    auto pq_drop = [&](uint32_t vid, int chan) {
+      if (pq == nullptr || ef_fill) return false;
+      if (pq->dist(qvec, vid) <= pq_bound) return false;
+      if (gated != nullptr) gated[chan]++;
+      return !pq_shadow;
+    };
 
     while (true) {
       uint8_t *ptr = (uint8_t *)(deg_ngh + ofs);
@@ -439,12 +456,14 @@ class ScalaGraphIndex {
           if (tman.global_query[query_id]->is_core_machine[pid]) {
             // core ngh send to core machine
             for (uint32_t d = 0; d < deg; d++) {
+              if (pq_drop(ngh_ptr[d], CH_MICRO)) continue;
               tman.global_query[query_id]
                   ->sync_msg.core_micro_ngh[pid]
                   .emplace_back(ngh_ptr[d]);
             }
           } else {  // async read to non-core machine
             for (uint32_t d = 0; d < deg; d++) {
+              if (pq_drop(ngh_ptr[d], CH_READ)) continue;
               uint32_t internal_id =
                   scala_graph_get_internal_id(pid, ngh_ptr[d]);
               // TODO: change to bufcache_ptr
