@@ -1,18 +1,20 @@
 # Refactor notes
 
-This change reorganizes existing behavior. The issues below were found by
-reading the original code and are intentionally not fixed. Their measured
-impact is unknown; no tests or search/index workloads were run for the refactor.
+The refactor reorganized existing behavior without fixing the issues found
+while reading the original code. No tests or search/index workloads were run
+as part of that refactor. Follow-up fixes are marked below; the validation
+boundary at the end describes the original refactor only.
 
-## Suspected pre-existing defects
+## Pre-existing defects and follow-up status
 
-1. **Top-index neighbor iteration appears off by one.**
+1. **Fixed: top-index neighbor iteration was off by one.**
    In `include/anns/search/seed_search.h`, `search_top_index` obtains an array
-   whose first word is the neighbor count, loops `d = 0 .. count-1`, and uses
-   `ngh_arr[d]` as the neighbor ID. This appears to treat the count as an ID and
-   omit the final neighbor. The look-ahead uses `ngh_arr[d + 1]`, but the actual
-   vector lookup and distance computation still use the original `d` access.
-   This came from `coro_sub_query_v5` in `scala_search.h`.
+   whose first word is the neighbor count. The original `d = 0 .. count-1`
+   loop used `ngh_arr[d]`, treating the count as an ID and omitting the final
+   neighbor. It now reads `neighbor_id = ngh_arr[d + 1]` and uses that same ID
+   for prefetch, global-ID lookup, distance evaluation and candidate insertion.
+   This fixes the traversal without changing the stored index format. The
+   original defect came from `coro_sub_query_v5` in `scala_search.h`.
 
 2. **Neighbor prefetch look-ahead can read past the logical list.**
    `process_inline_neighbor_tasks` in

@@ -52,12 +52,12 @@ void ScalaSearch<dist_t>::search_top_index(size_t query_id) {
 
     _mm_prefetch((char *)(ngh_arr + 1), _MM_HINT_T0);
     for (uint32_t d = 0; d < ngh_arr[0]; d++) {
+      // Slot 0 is the degree; neighbor IDs start at slot 1.
+      const uint32_t neighbor_id = ngh_arr[d + 1];
       _mm_prefetch(
-          graph_index.top_index->get_vector(ngh_arr[d + 1]), _MM_HINT_T0);
+          graph_index.top_index->get_vector(neighbor_id), _MM_HINT_T0);
 
-      // Existing d-based access includes the degree slot. Preserve it here;
-      // the suspected off-by-one is recorded in docs/refactor-notes.md.
-      uint32_t gt_id = graph_index.top_index->get_global_id(ngh_arr[d]);
+      uint32_t gt_id = graph_index.top_index->get_global_id(neighbor_id);
       if (!global_query[query_id]->visit_hash.CheckAndSet(gt_id)) {
 #ifdef PROF_COMPUTATION
         computation_cnt++;
@@ -65,11 +65,11 @@ void ScalaSearch<dist_t>::search_top_index(size_t query_id) {
 #ifdef COMM_PROFILE
         comm_ctx->work_dist++;
 #endif
-        char *vec_data = graph_index.top_index->get_vector(ngh_arr[d]);
+        char *vec_data = graph_index.top_index->get_vector(neighbor_id);
         dist_t dist = fstdistfunc_(
             global_query[query_id]->vector, vec_data, dist_func_param_);
         CandidateSet<dist_t>::accept_top(
-            *global_query[query_id], dist, ngh_arr[d]);
+            *global_query[query_id], dist, neighbor_id);
       }
     }
   }
