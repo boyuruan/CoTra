@@ -1060,197 +1060,6 @@ int kmeans_partition(IndexParameter &index_param) {
   return 0;
 }
 
-/**
- * For baseline2 random range partition.
- */
-template <typename T, typename LabelT>
-int random_partition(IndexParameter &index_param) {
-  std::cout << "Executing random_partition()" << std::endl;
-  if (!std::is_same<T, float>::value &&
-      (index_param.metric == diskann::Metric::INNER_PRODUCT ||
-       index_param.metric == diskann::Metric::COSINE)) {
-    std::stringstream stream;
-    stream << "Disk-index build currently only supports floating point data "
-              "for Max "
-              "Inner Product Search/ cosine similarity. "
-           << std::endl;
-    throw diskann::ANNException(stream.str(), -1);
-  }
-
-  // output a new base file which contains extra dimension with sqrt(1 -
-  // ||x||^2/M^2) for every x, M is max norm of all points. Extra space on
-  // disk needed!
-  if (index_param.metric == diskann::Metric::INNER_PRODUCT) {
-    Timer timer;
-    std::cout << "Using Inner Product search, so need to pre-process base "
-                 "data into temp file. Please ensure there is additional "
-                 "(n*(d+1)*4) bytes for storing pre-processed base vectors, "
-                 "apart from the interim indices created by DiskANN and the "
-                 "final index."
-              << std::endl;
-    index_param.data_file_to_use = index_param.prepped_base;
-    float max_norm_of_base = diskann::prepare_base_for_inner_products<T>(
-        index_param.data_path, index_param.prepped_base);
-    std::string norm_file = index_param.disk_index_path + "_max_base_norm.bin";
-    diskann::save_bin<float>(norm_file, &max_norm_of_base, 1, 1);
-    diskann::cout << timer.elapsed_seconds_for_step(
-                         "preprocessing data for inner product")
-                  << std::endl;
-    index_param.created_temp_file_for_processed_data = true;
-  } else if (index_param.metric == diskann::Metric::COSINE) {
-    Timer timer;
-    std::cout << "Normalizing data for cosine to temporary file, please ensure "
-                 "there is additional "
-                 "(n*d*4) bytes for storing normalized base vectors, "
-                 "apart from the interim indices created by DiskANN and the "
-                 "final index."
-              << std::endl;
-    index_param.data_file_to_use = index_param.prepped_base;
-    diskann::normalize_data_file(
-        index_param.data_path, index_param.prepped_base);
-    diskann::cout << timer.elapsed_seconds_for_step(
-                         "preprocessing data for cosine")
-                  << std::endl;
-    index_param.created_temp_file_for_processed_data = true;
-  }
-
-  double final_index_ram_limit = get_memory_budget(index_param.B);
-  if (final_index_ram_limit <= 0) {
-    std::cerr << "Insufficient memory budget (or string was not in right "
-                 "format). Should be > 0."
-              << std::endl;
-    return -1;
-  }
-  double indexing_ram_budget = index_param.M;
-  if (indexing_ram_budget <= 0) {
-    std::cerr << "Not building index. Please provide more RAM budget"
-              << std::endl;
-    return -1;
-  }
-  uint32_t num_threads = index_param.num_threads;
-
-  if (num_threads != 0) {
-    omp_set_num_threads(num_threads);
-    mkl_set_num_threads(num_threads);
-  }
-
-  diskann::cout << "Starting index partition: max_degree=" << index_param.max_degree
-                << " L=" << index_param.L
-                << " Query RAM budget: " << final_index_ram_limit
-                << " Indexing ram budget: " << indexing_ram_budget
-                << " T: " << num_threads << std::endl;
-
-  auto s = std::chrono::high_resolution_clock::now();
-
-  size_t points_num, dim;
-
-  Timer timer;
-  diskann::get_bin_metadata(
-      index_param.data_file_to_use.c_str(), points_num, dim);
-  const double p_val = ((double)MAX_PQ_TRAINING_SET_SIZE / (double)points_num);
-
-  // [No compression currently]
-
-// Gopal. Splitting diskann_dll into separate DLLs for search and build.
-// This code should only be available in the "build" DLL.
-#if defined(DISKANN_RELEASE_UNUSED_TCMALLOC_MEMORY_AT_CHECKPOINTS) && \
-    defined(DISKANN_BUILD)
-  MallocExtension::instance()->ReleaseFreeMemory();
-#endif
-  // Whether it is cosine or inner product, we still L2 metric due to the
-  // pre-processing.
-  timer.reset();
-
-  size_t base_num, base_dim;
-  diskann::get_bin_metadata(index_param.data_path, base_num, base_dim);
-
-  double full_index_ram = estimate_ram_usage(
-      base_num, (uint32_t)base_dim, sizeof(T), index_param.max_degree);
-
-  Timer timer_partition;
-
-#ifdef TARGET_PARTS
-  int target_parts = TARGET_PARTS;
-  random_slice_parts<T>(
-      index_param, target_parts);
-  int num_parts = target_parts;
-  std::cout << "====Target parts: " << target_parts
-            << " Number of replicas: " << NUM_REPLICA << std::endl;
-#else
-  int num_parts = partition_with_ram_budget<T>(
-      index_param.data_path, p_val, ram_budget, 2 * R / 3, merged_index_prefix,
-      1);
-#endif
-  diskann::cout << timer_partition.elapsed_seconds_for_step(
-                       "partitioning data ")
-                << std::endl;
-
-  std::string cur_centroid_filepath =
-      index_param.merged_index_prefix + "_centroids.bin";
-  std::rename(
-      cur_centroid_filepath.c_str(), index_param.centroids_path.c_str());
-
-  timer_partition.reset();
-
-  /**
-   * Split base to parititons.
-   */
-
-  // TODO: Put this part to build.
-  std::cout << "====Begin to Retrieve Partitioned Data====" << std::endl;
-  // exit(1);
-  for (int p = 0; p < num_parts; p++) {
-#if defined(DISKANN_RELEASE_UNUSED_TCMALLOC_MEMORY_AT_CHECKPOINTS) && \
-    defined(DISKANN_BUILD)
-    MallocExtension::instance()->ReleaseFreeMemory();
-#endif
-
-    // build partitioned by k-means
-    // index_param.shard_base_file = index_param.merged_index_prefix +
-    //                               "_subshard-" + std::to_string(p) + ".bin";
-
-    // index_param.shard_ids_file = index_param.merged_index_prefix +
-    //                              "_subshard-" + std::to_string(p) +
-    //                              "_ids_uint32.bin";
-
-    // index_param.shard_labels_file = index_param.merged_index_prefix +
-    //                                 "_subshard-" + std::to_string(p) +
-    //                                 "_labels.txt";
-
-
-    // NOTE: To unify random and kmeans partition, for the random partition
-    // we use the part_replica_idmap_filename and part_replica_base_filename 
-    // to store the partition id and vector. So, both file is actually no-replica.
-    retrieve_shard_data_from_ids<T>(
-        index_param.data_path, index_param.part_noreplica_idmap_filename[p],
-        index_param.part_noreplica_base_filename[p]);
-
-    // index_param.shard_index_file = index_param.merged_index_prefix +
-    //                                "_subshard-" + std::to_string(p) +
-    //                                "_mem.index";
-  }
-  // build partitioned by k-means
-  // reset to local index param.
-  // index_param.shard_base_file = index_param.merged_index_prefix +
-  // "_subshard-" +
-  //                               std::to_string(0) + ".bin";
-  // index_param.shard_ids_file = index_param.merged_index_prefix + "_subshard-"
-  // +
-  //                              std::to_string(0) + "_ids_uint32.bin";
-  // index_param.shard_labels_file = index_param.merged_index_prefix +
-  //                                 "_subshard-" + std::to_string(0) +
-  //                                 "_labels.txt";
-  // index_param.shard_index_file = index_param.merged_index_prefix +
-  //                                "_subshard-" + std::to_string(0) +
-  //                                "_mem.index";
-  diskann::cout << timer.elapsed_seconds_for_step("partition with kmeans time ")
-                << std::endl;
-
-  timer.reset();
-
-  return 0;
-}
-
 template <typename T, typename LabelT>
 void build_all_partition(IndexParameter &index_param){
   diskann::cout << "Building all partition in local, thread num: "
@@ -1262,10 +1071,7 @@ void build_all_partition(IndexParameter &index_param){
     mkl_set_num_threads(num_threads);
   }
 
-  // set to the same degree for SharedNothing baseline.
-  uint32_t partition_degree = index_param.graph_type == SharedNothing
-                                  ? index_param.max_degree
-                                  : (2 * index_param.max_degree / 3);
+  uint32_t partition_degree = 2 * index_param.max_degree / 3;
 
   diskann::IndexWriteParameters low_degree_params =
       diskann::IndexWriteParametersBuilder(index_param.L, partition_degree)
@@ -1319,10 +1125,7 @@ void build_local_partition(IndexParameter &index_param) {
     mkl_set_num_threads(num_threads);
   }
 
-  // set to the same degree for SharedNothing baseline.
-  uint32_t partition_degree = index_param.graph_type == SharedNothing
-                                  ? index_param.max_degree
-                                  : (2 * index_param.max_degree / 3);
+  uint32_t partition_degree = 2 * index_param.max_degree / 3;
 
   diskann::IndexWriteParameters low_degree_params =
       diskann::IndexWriteParametersBuilder(index_param.L, partition_degree)
@@ -2799,19 +2602,6 @@ template DISKANN_DLLEXPORT int kmeans_partition<int8_t, uint16_t>(
 template DISKANN_DLLEXPORT int kmeans_partition<float, uint16_t>(
     IndexParameter &index_param);
 template DISKANN_DLLEXPORT int kmeans_partition<uint8_t, uint16_t>(
-    IndexParameter &index_param);
-
-template DISKANN_DLLEXPORT int random_partition<int8_t, uint32_t>(
-    IndexParameter &index_param);
-template DISKANN_DLLEXPORT int random_partition<float, uint32_t>(
-    IndexParameter &index_param);
-template DISKANN_DLLEXPORT int random_partition<uint8_t, uint32_t>(
-    IndexParameter &index_param);
-template DISKANN_DLLEXPORT int random_partition<int8_t, uint16_t>(
-    IndexParameter &index_param);
-template DISKANN_DLLEXPORT int random_partition<float, uint16_t>(
-    IndexParameter &index_param);
-template DISKANN_DLLEXPORT int random_partition<uint8_t, uint16_t>(
     IndexParameter &index_param);
 
 template DISKANN_DLLEXPORT void build_all_partition<int8_t, uint32_t>(

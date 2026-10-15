@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(rdma-anns)
 
-# Compiler and library locations come from the environment. Index builds use
-# LP64 OpenBLAS through third_party/compat/mkl.h, not the cluster ILP64 MKL.
+# Standalone CoTra + /dev/shm build.
+# Index builds use LP64 OpenBLAS through third_party/compat/mkl.h.
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules")
 
@@ -32,21 +32,16 @@ add_compile_definitions(MACHINE_NUM=${MACHINE_NUM})
 
 option(COTRA_WITH_INDEX
   "Build the index and ANN binaries. Needs OpenBLAS, LAPACK, and libaio."
-  OFF)
+  ON)
 
 find_package(Threads REQUIRED)
 find_package(Boost 1.58.0 REQUIRED
   COMPONENTS serialization iostreams program_options system filesystem)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(IBVERBS REQUIRED IMPORTED_TARGET libibverbs)
-pkg_check_modules(RDMACM REQUIRED IMPORTED_TARGET librdmacm)
-find_library(MEMCACHED_LIB memcached REQUIRED)
 
 include_directories(${CMAKE_SOURCE_DIR}/third_party)
 
 if(COTRA_WITH_INDEX)
-  # Fedora ships OpenBLAS without openblas.pc. Debian and the Intel oneAPI
-  # layout do provide it.
   pkg_check_modules(OPENBLAS IMPORTED_TARGET openblas)
   if(TARGET PkgConfig::OPENBLAS)
     add_library(OpenBLAS::OpenBLAS ALIAS PkgConfig::OPENBLAS)
@@ -77,16 +72,12 @@ target_include_directories(rdma_anns PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  # Bare includes ("logger.h") inside DiskANN headers. Not global: coromem also
-  # has a utils.h, and a global -I would hide it.
   ${CMAKE_SOURCE_DIR}/third_party/diskann/include
 )
 target_link_libraries(rdma_anns PUBLIC
   coromem
   Threads::Threads
-  PkgConfig::IBVERBS
-  PkgConfig::RDMACM
-  ${MEMCACHED_LIB}
+  rt
   Boost::program_options
 )
 

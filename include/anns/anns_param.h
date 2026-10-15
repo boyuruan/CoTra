@@ -11,9 +11,8 @@
 #include "coromem/include/galois/loops.h"
 #include "coromem/include/share_mem.h"
 #include "coromem/include/utils.h"
-#include "rdma/ip_config.h"
-#include "rdma/rdma_param.h"
 #include "index/index_param.h"
+#include "rdma/rdma_param.h"
 
 using namespace hnswlib;
 using namespace std;

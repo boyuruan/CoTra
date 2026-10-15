@@ -716,9 +716,6 @@ struct RecvWriteBuffer {
     When used as recv buffer, buff_id_list[m] record the
     meta data of received buffer for machine m.
   */
-  std::deque<char*> b2_start_queue;  // for B2
-  std::deque<char*> b2_end_queue;    // for B2
-
   std::deque<char*> part_info_queue;      // for build
   std::deque<char*> build_sync_queue;     // for build
   std::deque<char*> dispatch_meta_queue;  // for build

@@ -1,93 +1,35 @@
 #!/bin/bash
-# scalagraph_v3 index and scala_v3 search, then single on the merged graph
-# as the reference. MACHINE_NUM processes (default 2), one rxe, machine id
-# from -m. With DATA_DIR unset, builds the synthetic uint8 set. With DATA_DIR
-# set, uses that directory's base.bin, query.bin, gt.bin, and meta.txt
-# ("npts dim nq k", k is res_knn). The index goes to WORKDIR and logs to
-# LOG_DIR, so DATA_DIR can be read-only. Expects the repo at /src,
-# --privileged, --network host, and the host /lib/modules.
-# SKIP_INDEX=1 searches the index already in WORKDIR. SKIP_SINGLE=1 skips
-# the single reference and the pass rule. SEARCH_ARGS is appended to the
-# scala_v3 command line. BUILD_DIR keeps the build across containers.
-# PQ_CHUNKS > 0 encodes base.bin into WORKDIR/pq<chunks> once and turns on
-# the scala_v3 PQ gate with PQ_TAU (negative: count only).
+# Standalone CoTra (scalagraph_v3 index + scala_v3 search) over POSIX /dev/shm.
+# MACHINE_NUM processes (default 2), machine id from -m.
+# With DATA_DIR unset, builds the synthetic uint8 set. With DATA_DIR set, uses
+# that directory's base.bin, query.bin, gt.bin, and meta.txt ("npts dim nq k",
+# k is res_knn). The index goes to WORKDIR and logs to LOG_DIR, so DATA_DIR can
+# be read-only. Expects the repo at /src and --ipc=host.
+# SKIP_INDEX=1 searches the index already in WORKDIR. SEARCH_ARGS is appended to
+# the scala_v3 command line. BUILD_DIR keeps the build across containers.
+# PQ_CHUNKS > 0 encodes base.bin into WORKDIR/pq<chunks> once and turns on the
+# scala_v3 PQ gate with PQ_TAU (negative: count only).
 set -euo pipefail
 
 N=${MACHINE_NUM:-2}
 SAMPLE_PERCENT=${SAMPLE_PERCENT:-0.01}
 SEARCH_TIMEOUT=${SEARCH_TIMEOUT:-300}
 INDEX_TIMEOUT=${INDEX_TIMEOUT:-300}
-SINGLE_TIMEOUT=${SINGLE_TIMEOUT:-300}
 SKIP_INDEX=${SKIP_INDEX:-0}
-SKIP_SINGLE=${SKIP_SINGLE:-0}
 PQ_CHUNKS=${PQ_CHUNKS:-0}
 PQ_TAU=${PQ_TAU:-0}
-IB_DEV=${IB_DEV:-rxe0}
+IB_DEV=${IB_DEV:-shm}
 read -ra EXTRA_SEARCH <<< "${SEARCH_ARGS:-}"
 LOG_DIR=${LOG_DIR:-/tmp}
 WORKDIR=${WORKDIR:-/tmp/cotra-work-${N}}
-CONF=/tmp/ip_local_${N}.conf
-PORT=21211
 BUILD=${BUILD_DIR:-/tmp/cotra-build-${N}}
 DATA=${DATA_DIR:-/tmp/cotra-synth}
 PREFIX=${WORKDIR}/merged
 INDEX_BIN=${BUILD}/tests/scala_index
 ANNS_BIN=${BUILD}/tests/scala_anns
-# Pass rule at this ef: scala_v3 recall >= MIN_RECALL and >= single - MAX_GAP.
+# Pass rule at this ef: scala_v3 recall >= MIN_RECALL.
 CHECK_EF=100
-MIN_RECALL=0.9
-MAX_GAP=0.03
-
-setup_memcached() {
-  if [[ -f /tmp/memcached.pid ]]; then
-    kill "$(cat /tmp/memcached.pid)" 2>/dev/null || true
-    wait "$(cat /tmp/memcached.pid)" 2>/dev/null || true
-    rm -f /tmp/memcached.pid
-  fi
-  pkill -x memcached 2>/dev/null || true
-  # A memcached from an earlier run is not our child, so wait cannot reap it.
-  # Until it exits it holds the port and answers the readiness probe.
-  local i pid
-  for i in $(seq 50); do
-    pgrep -x memcached >/dev/null || break
-    sleep 0.1
-  done
-  # Stay a child of this shell so stderr is captured. -d on Ubuntu returns
-  # before the daemon is listening, and a failed bind is easy to miss.
-  memcached -u memcached -l 127.0.0.1 -p "${PORT}" -c 1024 \
-    >/tmp/memcached.log 2>&1 &
-  pid=$!
-  echo "${pid}" >/tmp/memcached.pid
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    kill -0 "${pid}" 2>/dev/null || break
-    if printf 'set serverNum 0 0 1\r\n0\r\nquit\r\n' \
-        | nc -w 2 127.0.0.1 "${PORT}" | grep -q STORED; then
-      printf 'set clientNum 0 0 1\r\n0\r\nquit\r\n' \
-        | nc -w 2 127.0.0.1 "${PORT}" >/dev/null
-      return 0
-    fi
-    sleep 0.2
-  done
-  echo "memcached did not accept a set"
-  cat /tmp/memcached.log || true
-  return 1
-}
-
-link_rxe() {
-  rdma link del rxe0 2>/dev/null || true
-  rdma link add rxe0 type rxe netdev lo
-  rdma link show
-}
-
-# Machine names are placeholders; -m picks the id.
-write_conf() {
-  local m
-  {
-    echo 127.0.0.1
-    echo "${PORT}"
-    for ((m = 0; m < N; m++)); do echo "local${m}=${m}"; done
-  } >"${CONF}"
-}
+MIN_RECALL=0.99
 
 # Leader in the foreground. Followers get a short grace after the leader exits.
 run_all() {
@@ -98,9 +40,6 @@ run_all() {
   local m lstatus failed=0
   local -a pids status
 
-  if [[ "${IB_DEV}" != shm* ]]; then
-    setup_memcached
-  fi
   for ((m = 1; m < N; m++)); do
     stdbuf -oL -eL "${bin}" -m "${m}" "$@" >"${LOG_DIR}/${name}.m${m}.log" 2>&1 &
     pids[m]=$!
@@ -133,15 +72,10 @@ run_all() {
     tail -n 25 "${LOG_DIR}/${name}.m${m}.log" || true
     [[ "${status[m]}" -eq 0 ]] || failed=1
   done
-  if [[ ${failed} -ne 0 ]]; then
-    echo "===== memcached.log ====="
-    cat /tmp/memcached.log || true
-  fi
   return ${failed}
 }
 
 # scala_v3 machine 0 prints the all-machine aggregate: "ef \t recall \t ...".
-# single prints "ef\trecall\t<us> us\t...". Partition-size lines have no tab.
 RECALL_LINE='^[0-9]+ ?\t ?[0-9.]+ ?\t'
 recall_rows() {
   awk -v re="${RECALL_LINE}" '$0 ~ re { print $1, $2 }' "$1"
@@ -153,12 +87,8 @@ recall_at() {
   '
 }
 
-if [[ "${IB_DEV}" != shm* ]]; then
-  modprobe rdma_rxe
-fi
 g++ --version | head -n 1
 echo "MACHINE_NUM=${N} SAMPLE_PERCENT=${SAMPLE_PERCENT} IB_DEV=${IB_DEV}"
-write_conf
 mkdir -p "${WORKDIR}" "${LOG_DIR}"
 g++ -O2 -o /tmp/check_remote /src/scripts/softroce/check_remote.cc
 if [[ -z "${DATA_DIR:-}" ]]; then
@@ -209,14 +139,9 @@ if (( PQ_CHUNKS > 0 )); then
   EXTRA_SEARCH+=(--pq_prefix "${PQ_PREFIX}" --pq_tau "${PQ_TAU}")
 fi
 
-if [[ "${IB_DEV}" != shm* ]]; then
-  link_rxe
-fi
-
 # SAMPLE_PERCENT defaults to 0.01 as in the cluster scripts. The top index is
 # on every machine; at 1.0 it holds every point and the issuer finds GT locally.
 COMMON=(
-  --config_file "${CONF}"
   --data_type uint8
   --dist_fn l2
   --data_path "${DATA}/base.bin"
@@ -243,7 +168,7 @@ if [[ ${SKIP_INDEX} -eq 1 ]]; then
 else
   if ! run_all index "${INDEX_TIMEOUT}" "${INDEX_BIN}" \
     --graph_type scalagraph_v3 "${COMMON[@]}"; then
-    echo "soft-roce synthetic index build failed"
+    echo "standalone shm index build failed"
     exit 1
   fi
 
@@ -268,50 +193,28 @@ fi
 if ! run_all search "${SEARCH_TIMEOUT}" "${ANNS_BIN}" \
   --graph_type scalagraph_v3 "${COMMON[@]}" --app_type scala_v3 \
   "${QUERY[@]}" "${EXTRA_SEARCH[@]}"; then
-  echo "soft-roce synthetic search failed"
+  echo "standalone shm search failed"
   exit 1
 fi
 
-if [[ ${SKIP_SINGLE} -eq 1 ]]; then
-  echo "===== recall: ef scala_v3(all machines) ====="
-  recall_rows "${LOG_DIR}/search.m0.log"
-  echo "search finished; single and the pass rule were skipped"
-  exit 0
-fi
-
-set +e
-stdbuf -oL -eL timeout --foreground "${SINGLE_TIMEOUT}" "${ANNS_BIN}" -m 0 \
-  --graph_type vamana "${COMMON[@]}" --app_type single "${QUERY[@]}" \
-  >"${LOG_DIR}/single.log" 2>&1
-SINGLE_STATUS=$?
-set -e
-if [[ ${SINGLE_STATUS} -ne 0 ]]; then
-  echo "single on the merged graph exited ${SINGLE_STATUS}"
-  tail -n 40 "${LOG_DIR}/single.log" || true
-  exit 1
-fi
-
-echo "===== recall: ef scala_v3(all machines) single(merged graph) ====="
-join <(recall_rows "${LOG_DIR}/search.m0.log" | sort -k1,1) \
-     <(recall_rows "${LOG_DIR}/single.log" | sort -k1,1) | sort -n
+echo "===== recall: ef scala_v3(all machines) ====="
+recall_rows "${LOG_DIR}/search.m0.log"
 
 SCALA_R=$(recall_at "${LOG_DIR}/search.m0.log" "${CHECK_EF}") || SCALA_R=""
-SINGLE_R=$(recall_at "${LOG_DIR}/single.log" "${CHECK_EF}") || SINGLE_R=""
-if [[ -z "${SCALA_R}" || -z "${SINGLE_R}" ]]; then
+if [[ -z "${SCALA_R}" ]]; then
   echo "no recall line at ef ${CHECK_EF}"
   exit 1
 fi
-echo "ef ${CHECK_EF}: scala_v3 ${SCALA_R} single ${SINGLE_R}"
+echo "ef ${CHECK_EF}: scala_v3 ${SCALA_R}"
 if (( SKIP_INDEX == 0 && N > 2 && REMOTE_SUM == 0 )); then
   echo "no out-of-line remote neighbor ids"
   exit 1
 fi
-if ! awk -v s="${SCALA_R}" -v b="${SINGLE_R}" -v lo="${MIN_RECALL}" \
-    -v gap="${MAX_GAP}" 'BEGIN { exit !(s >= lo && s >= b - gap) }'; then
-  echo "scala_v3 recall below ${MIN_RECALL}" \
-    "or more than ${MAX_GAP} under single"
+if ! awk -v s="${SCALA_R}" -v lo="${MIN_RECALL}" \
+    'BEGIN { exit !(s >= lo) }'; then
+  echo "scala_v3 recall ${SCALA_R} below ${MIN_RECALL}"
   exit 1
 fi
 
-echo "soft-roce synthetic e2e passed (MACHINE_NUM=${N})"
+echo "standalone shm e2e passed (MACHINE_NUM=${N})"
 exit 0

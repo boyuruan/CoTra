@@ -7,13 +7,9 @@
 #include "diskann/include/cached_io.h"
 #include "diskann/include/common_includes.h"
 #include "diskann/include/utils.h"
-// #include "kmeans.h"
 #include "rdma/rdma_config.h"
 
 #define TARGET_PARTS (MACHINE_NUM)
-// #define TARGET_PARTS 2
-// #define TARGET_PARTS 8
-// #define TARGET_PARTS 16
 #define NUM_REPLICA 2
 #define KMEANS_SAMPLE_SIZE 1000000
 #define META_DATA_RATIO (0.01)
@@ -23,11 +19,6 @@
 namespace po = boost::program_options;
 
 typedef enum {
-  HNSW_RANDOM,
-  HNSW_KMEANS,
-  VAMANA,
-  KmeansSharedNothing,
-  SharedNothing,
   SCALA_V3
 } GraphType;
 
@@ -43,21 +34,20 @@ class IndexParameter {
   uint32_t subset_size_milllions;  // 0: vec_num comes from the bin header
   uint32_t thread_num;
 
-  size_t local_max_vid;  // local partitioon max node id
+  size_t local_max_vid;  // local partition max node id
   uint32_t max_degree;   // final max degree
 
   size_t b1_ele_size;
 
   size_t replica_num;  // partition replica number.
 
-  std::string config_file; 
+  std::string config_file;
 
   std::string graph_type_str, data_type, dist_fn, data_path, index_path_prefix,
       codebook_prefix, label_file, universal_label, label_type;
 
   GraphType graph_type;
 
-  // TODO: merge this
   std::string index_prefix_path;
 
   std::string local_replica_base_file;
@@ -67,17 +57,11 @@ class IndexParameter {
   std::string local_replica_labels_file;
   std::string local_noreplica_labels_file;
   std::string local_index_file;  // not final index, before merge
-  std::string temp_b1_index;     // for test, **all** merged b1 index.
   std::string temp_label2pos_map_file;
   std::string temp_pos2label_map_file;
   std::string temp_id2part_map_file;
 
-  std::string b2_index_file[MACHINE_NUM];
-  std::string local_b2_index_file;
-
-  // only for b1graph transfered from vamana
-  std::string temp_kmeans_data_file; // only store the kmeans vector data.
-  // std::string temp_vamana_b1graph_file; // store the b1graph transfer from vamana, now set equal to final
+  std::string temp_kmeans_data_file;
 
   size_t disk_pq_dims = 0;
   bool use_disk_pq = false;
@@ -89,16 +73,13 @@ class IndexParameter {
   std::string pq_pivots_path_base;
   std::string pq_pivots_path;
   std::string pq_compressed_vectors_path;
-  std::string mem_index_path;       // temp index name, use for single machine.
-  std::string final_index_path;     // final **local** merged index path (final_part_index_path[local id])
-  std::string final_b1_index_path;  // final **local** merged b1 index path (final_part_b1_index_path[local id])
-  std::string
-      final_scala_index_path;         // final **local** merged scala index path (final_part_scala_index_path[local id])
-  std::string final_scala_data_path;  // final **local** merged scala data path (final_part_scala_data_path[local id])
-  // final **all** merged scala index and data path.
+  std::string mem_index_path;
+  std::string final_index_path;     // final local merged index path
+  std::string final_b1_index_path;  // final local merged b1 index path
+  std::string final_scala_index_path;
+  std::string final_scala_data_path;
   std::string final_part_scala_index_path[MACHINE_NUM];
   std::string final_part_scala_data_path[MACHINE_NUM];
-  // final **all** merged index path, for test merge
   std::string final_part_index_path[MACHINE_NUM];
   std::string final_part_b1_index_path[MACHINE_NUM];
   std::string disk_index_path;
@@ -106,8 +87,8 @@ class IndexParameter {
   std::string centroids_path;
 
   uint32_t topindex_deg;
-  std::string top_sample_percent; // top index sampling rate.
-  std::string top_index_path;  // store the path of top index.
+  std::string top_sample_percent;  // top index sampling rate.
+  std::string top_index_path;      // store the path of top index.
 
   std::string labels_to_medoids_path = disk_index_path;
   std::string mem_labels_file = mem_index_path;
@@ -115,16 +96,12 @@ class IndexParameter {
   std::string mem_univ_label_file = mem_index_path;
   std::string disk_univ_label_file = disk_index_path;
   std::string disk_labels_int_map_file = disk_index_path;
-  std::string dummy_remap_file;  // remap will be used if we break-up points of
-                                 // high label-density to create copies
+  std::string dummy_remap_file;
 
   std::string sample_base_prefix;
-  // optional, used if disk index file must store pq data
   std::string disk_pq_pivots_path;
-  // optional, used if disk index must store pq data
   std::string disk_pq_compressed_vectors_path;
-  std::string prepped_base;  // temp file for storing pre-processed base file
-                             // for cosine/ mips metrics
+  std::string prepped_base;
   bool created_temp_file_for_processed_data = false;
 
   std::string final_index_universal_label_file;
@@ -158,7 +135,7 @@ class IndexParameter {
   // store the sorted ids of each partition (without replica).
   std::vector<uint32_t> part_noreplica_ids[MACHINE_NUM];
 
-  // kmeans_idmap[vid]: parition id stored the vid (here vid is label).
+  // kmeans_idmap[vid]: partition id stored the vid (here vid is label).
   uint32_t *kmeans_id2part_map;
 
   // whether recv all meta for one partition.
@@ -166,18 +143,17 @@ class IndexParameter {
 
   /* dispatch & collect ids */
   size_t dispatch_id_num[MACHINE_NUM];  // for send meta
-  char *dispatch_ids[MACHINE_NUM];        // for send ids.
+  char *dispatch_ids[MACHINE_NUM];      // for send ids.
   size_t collect_id_num[MACHINE_NUM];   // for recv meta
   size_t collect_id_cnt[MACHINE_NUM];   // for recv count.
-  char *collected_ids[MACHINE_NUM];       // recved id to merge.
+  char *collected_ids[MACHINE_NUM];     // recved id to merge.
 
   /* dispatch & collect nghs */
-  // store the size of dispatch nghs. (local partitions)
   size_t dispatch_ngh_num[MACHINE_NUM];  // for send meta
-  char *dispatch_nghs[MACHINE_NUM];        // for send nghs.
+  char *dispatch_nghs[MACHINE_NUM];      // for send nghs.
   size_t collect_ngh_num[MACHINE_NUM];   // for recv meta
   size_t collect_ngh_cnt[MACHINE_NUM];   // for recv count.
-  char *collected_nghs[MACHINE_NUM];       // recved ngh to merge.
+  char *collected_nghs[MACHINE_NUM];     // recved ngh to merge.
 
   // map
   uint32_t *label2pos_map;
@@ -206,8 +182,5 @@ class IndexParameter {
     return offset;
   }
 
-  void deserialize_info(char *ptr) {
-
-  }
-
+  void deserialize_info(char *ptr) {}
 };

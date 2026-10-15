@@ -6,4 +6,3 @@
 #define POST_RES_MERGE (20)
 #define POST_NODESYNC_MERGE (20)
 #define MAX_GRAPH_DEG (96)
-#define B2_KMEANS_BATCH (16)

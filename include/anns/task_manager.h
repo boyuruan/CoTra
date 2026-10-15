@@ -66,13 +66,6 @@ class TaskManager {
   std::vector<uint32_t> subquery_queue;  // store subquery ids.
   std::vector<uint32_t> next_subquery_queue;
 
-  // for b2 kmeans
-  std::map<uint32_t, QueryMsg<dist_t>*> ongoing_queries;
-  // ongoing query dispatched from other machines.
-  std::vector<uint32_t> b2_query_queue;
-  // finished query queue.
-  std::vector<uint32_t> b2_finished_queue;
-
   void swap_task_queue() {
     std::swap(cur_task_queue, next_task_queue);
     next_task_queue.clear();

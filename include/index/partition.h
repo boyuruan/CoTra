@@ -74,8 +74,3 @@ template <typename T>
 int partition_with_target_parts(
     IndexParameter &index_param, const double sampling_rate, double ram_budget,
     uint32_t target_parts, bool save_ids);
-
-template <typename T>
-int random_slice_parts(
-    IndexParameter &index_param, 
-    uint32_t target_parts);

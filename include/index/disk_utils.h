@@ -133,8 +133,6 @@ DISKANN_DLLEXPORT int build_disk_index_4_merge(
 // default is empty string for no universal label
 template <typename T, typename LabelT = uint32_t>
 DISKANN_DLLEXPORT int kmeans_partition(IndexParameter &index_param);
-template <typename T, typename LabelT = uint32_t>
-DISKANN_DLLEXPORT int random_partition(IndexParameter &index_param);
 
 template <typename T, typename LabelT = uint32_t>
 DISKANN_DLLEXPORT void build_all_partition(IndexParameter &index_param);

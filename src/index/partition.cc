@@ -1125,8 +1125,6 @@ int retrieve_shard_data_from_ids(
 
     std::cout<<"Data retrieval "<< (float)end_id*100.0/num_points 
       <<"% finished\r"<<std::flush;
-    // here we sleep for avoiding our shared servers meet problem.
-    sleep(3);
   }
 
   for (uint32_t p = 0; p < index_param.num_parts; p++) {
@@ -1715,16 +1713,6 @@ template DISKANN_DLLEXPORT int partition_with_target_parts<uint8_t>(
 template DISKANN_DLLEXPORT int partition_with_target_parts<float>(
     IndexParameter &index_param, const double sampling_rate, double ram_budget,
     uint32_t target_parts, bool save_ids);
-
-template DISKANN_DLLEXPORT int random_slice_parts<int8_t>(
-  IndexParameter &index_param, 
-  uint32_t target_parts);
-template DISKANN_DLLEXPORT int random_slice_parts<uint8_t>(
-  IndexParameter &index_param, 
-  uint32_t target_parts);
-template DISKANN_DLLEXPORT int random_slice_parts<float>(
-  IndexParameter &index_param, 
-  uint32_t target_parts);
 
 template DISKANN_DLLEXPORT int partition_with_ram_budget<int8_t>(
     const std::string data_file, const double sampling_rate, double ram_budget,

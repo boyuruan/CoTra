@@ -447,7 +447,8 @@ void run_sample_and_build(
   }
   uint32_t npts, dim;
   readHeader(ifs, npts, dim);
-  for (int i = 0; i < 10; ++i) {
+  size_t check_cnt = std::min<size_t>(10, sampledVectorIds.size());
+  for (size_t i = 0; i < check_cnt; ++i) {
     std::cout << "Verifying sampled vector " << i
               << " id: " << sampledVectorIds[i] << std::endl;
     size_t offset = 8 + sampledVectorIds[i] * dim * dataTypeSize(dataType);
@@ -486,56 +487,6 @@ void run_sample_and_build(
     buildAndSaveHnswIndex<int, data_t>(
         sampledVectors, sampledVectorIds, dimension, indexPath, M,
         efConstruction, space, label_trans_file, distType, dataType);
-  } else {
-    throw std::invalid_argument("Unknown data type: " + dataType);
-  }
-}
-
-void HNSWTopIndex::build_hnsw_top_index(commandLine &cmd) {
-  std::string dataPath = cmd.getOptionValue("--data_path", "data.bin");
-  std::string dataType = cmd.getOptionValue(
-      "--data_type", "uint8");  // e.g. "float", "int8", or "uint8"
-  std::string distType = cmd.getOptionValue("--dist_type", "l2");
-  std::string indexPath = cmd.getOptionValue("--index_path", "hnsw_index.bin");
-  std::string string_samplePercent =
-      cmd.getOptionValue("--sample_percent", "0.01");  // e.g. 1%
-  int M = cmd.getOptionIntValue("--topindex_deg", 16);
-  int efConstruction = cmd.getOptionIntValue("-e", 200);
-  int num_threads = cmd.getOptionIntValue("--num_threads", 1);
-  int part_num = cmd.getOptionIntValue("-p", 1);
-  std::string label_trans_file =
-      "/data/share/users/xyzhi/data/bigann/vamana/balance_kmeans_" +
-      std::to_string(part_num) + "_part/100M_" + std::to_string(part_num) +
-      "_labelpos_map.bin";
-
-  float samplePercent = atof(string_samplePercent.c_str());
-  std::cout << "[INFO] Starting HNSW Top index sampling build with the "
-               "following parameters:"
-            << std::endl;
-  std::cout << "       Data Path: " << dataPath << std::endl;
-  std::cout << "       Data Type: " << dataType << std::endl;
-  std::cout << "       Dist Type: " << distType << std::endl;
-  std::cout << "       Index Path: " << indexPath << std::endl;
-  std::cout << "       Sample Percent: " << samplePercent * 100 << "%"
-            << std::endl;
-  std::cout << "       M: " << M << std::endl;
-  std::cout << "       efConstruction: " << efConstruction << std::endl;
-  std::cout << "       Num Threads: " << num_threads << std::endl;
-
-  omp_set_num_threads(num_threads);
-
-  if (dataType == "float") {
-    run_sample_and_build<float>(
-        dataPath, dataType, distType, indexPath, string_samplePercent,
-        label_trans_file, M, efConstruction, num_threads, part_num);
-  } else if (dataType == "int8") {
-    run_sample_and_build<int8_t>(
-        dataPath, dataType, distType, indexPath, string_samplePercent,
-        label_trans_file, M, efConstruction, num_threads, part_num);
-  } else if (dataType == "uint8") {
-    run_sample_and_build<uint8_t>(
-        dataPath, dataType, distType, indexPath, string_samplePercent,
-        label_trans_file, M, efConstruction, num_threads, part_num);
   } else {
     throw std::invalid_argument("Unknown data type: " + dataType);
   }

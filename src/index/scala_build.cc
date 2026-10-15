@@ -368,7 +368,6 @@ void ScalaBuild::transfer_to_scala_v3() {
       write_size = (uint64_t)(expect_index_size - i);
     }
     index_output.write((char *)(index_ptr + i), write_size);
-    sleep(4);
     std::cout << "write "
               << (float)(i + write_size) * 100.0 / (expect_index_size) << "%\r "
               << std::flush;
@@ -425,13 +424,14 @@ void ScalaBuild::transfer_to_scala_v3() {
     data_ofs += index_param.vec_size + sizeof(uint64_t);
   }
 
-  if(data_ofs != scala_data_size){
-    std::cerr<<"Error: data offset not equal to expected.\n";
+  if (data_ofs != scala_data_size) {
+    std::cerr << "Error: data offset not equal to expected.\n";
     abort();
   }
   printf(
       "Write part %d data size %llu ...\n", index_param.machine_id,
       scala_data_size);
+  write_size = 1LL << 27;
   std::ofstream data_output(
       index_param.final_scala_data_path.c_str(), std::ios::binary);
   for (uint64_t i = 0; i < scala_data_size; i += write_size) {
@@ -439,16 +439,9 @@ void ScalaBuild::transfer_to_scala_v3() {
       write_size = (uint64_t)(scala_data_size - i);
     }
     data_output.write((char *)(out_data + i), write_size);
-    // for our nfs cluster ..
-    if(index_param.machine_id == 7 || index_param.machine_id == 6){
-      sleep(1);
-    }
-    else {
-      sleep(4);
-    }
-    
-    std::cout << "write " << (float)(i + write_size) * 100.0 / (scala_data_size)
-              << " %\r" << std::flush;
+    std::cout << "write "
+              << (float)(i + write_size) * 100.0 / (scala_data_size) << " %\r"
+              << std::flush;
   }
 
   printf(
@@ -459,325 +452,6 @@ void ScalaBuild::transfer_to_scala_v3() {
   // clear data memory
   free(out_data);
   free(data_level0_memory_);
-
-  return;
-}
-
-void ScalaBuild::verify_scala_v3() {
-  uint32_t cumupsize[index_param.num_parts + 1];
-  memset(cumupsize, 0, sizeof(cumupsize));
-  for (int p = 1; p < index_param.num_parts + 1; p++) {
-    cumupsize[p] = cumupsize[p - 1] + index_param.partition_size[p - 1];
-    std::cout << "cumupsize[" << p << "] = " << cumupsize[p] << std::endl;
-  }
-  index_param.local_partition_size =
-      index_param.partition_size[index_param.machine_id];
-
-  auto judge_partition = [&](uint64_t vid) {
-    for (int p = 0; p < index_param.num_parts; p++) {
-      if (cumupsize[p + 1] > vid) return p;
-    }
-    return -1;
-  };
-  // load original index
-  std::cout << "Loading kmeans b1graph index from " << index_param.temp_b1_index
-            << "...\n";
-  std::ifstream input(index_param.temp_b1_index.c_str(), std::ios::binary);
-  if (!input.is_open()) throw std::runtime_error("Cannot open file");
-
-  size_t read_max_elements_;
-  uint64_t read_enterpoint_node_;
-  input.read((char *)&read_max_elements_, sizeof(uint64_t));
-  input.read((char *)&read_enterpoint_node_, sizeof(uint32_t));
-  index_param.medoid = read_enterpoint_node_;
-
-  uint64_t size_data_per_element_ = sizeof(uint32_t) +
-                                    index_param.max_degree * sizeof(uint32_t) +
-                                    index_param.vec_size + sizeof(uint64_t);
-  size_t label_offset_ = sizeof(uint32_t) +
-                         index_param.max_degree * sizeof(uint32_t) +
-                         index_param.vec_size;
-  size_t offsetData_ =
-      sizeof(uint32_t) + index_param.max_degree * sizeof(uint32_t);
-
-  char *data_level0_memory_ =
-      (char *)malloc(read_max_elements_ * size_data_per_element_);
-  if (data_level0_memory_ == nullptr)
-    throw std::runtime_error(
-        "Not enough memory: loadIndex failed to allocate level0");
-  input.read(data_level0_memory_, read_max_elements_ * size_data_per_element_);
-
-  std::cout << "Kmeans & Index file read over, parition num:"
-            << index_param.num_parts << " parition size:" << read_max_elements_
-            << "size data per element:" << size_data_per_element_ << "\n";
-
-  // load scala index
-  printf("ScalaGraph V3 loading index ...\n");
-
-  uint32_t partition_num = index_param.num_parts;
-  uint32_t partition_id = index_param.machine_id;
-
-  /*
-    [ScalaGraph V3 index format]:
-    <partition_id: uint32_t>, <partition_num: uint32_t>,
-    <part_vec_num: uint32_t>, <local_ngh_ele_size: uint32_t>,
-    <enter_point: uint64_t>,
-    <remote_ngh_num: uint64_t>
-    (header 32 bytes)
-    <local_ngh_array: local_ngh_ele_size> * part_vec_num,
-    <remote_ngh_array: uint32_t> * remote_ngh_num.
-  */
-  char *deg_ngh[MACHINE_NUM];
-  uint32_t local_ngh_ele_size;
-  for (uint32_t m = 0; m < MACHINE_NUM; m++) {
-    if (!std::filesystem::exists(index_param.final_part_scala_index_path[m])) {
-      std::cout << "Error: file does not exist" << std::endl;
-      throw std::runtime_error("file does not exist");
-    }
-    std::ifstream idx_input(
-        index_param.final_part_scala_index_path[m], std::ios::binary);
-    uint32_t read_pid, read_pnum, read_pvec_num;
-    uint64_t enter_p, remote_ngh_num;
-    idx_input.read((char *)&read_pid, sizeof(uint32_t));
-    idx_input.read((char *)&read_pnum, sizeof(uint32_t));
-    idx_input.read((char *)&read_pvec_num, sizeof(uint32_t));
-    idx_input.read((char *)&local_ngh_ele_size, sizeof(uint32_t));
-    idx_input.read((char *)&enter_p, sizeof(uint64_t));
-    idx_input.read((char *)&remote_ngh_num, sizeof(uint64_t));
-    printf(
-        "partid %u partnum %u local_vec_num %llu "
-        "local_ngh_ele_size %llu remote_ngh_num %llu enter_point %llu\n",
-        read_pid, read_pnum, read_pvec_num, local_ngh_ele_size, remote_ngh_num,
-        enter_p);
-    assert(read_pid == partition_id && read_pnum == partition_num);
-
-    size_t index_size =
-        local_ngh_ele_size * read_pvec_num + remote_ngh_num * sizeof(uint32_t);
-    printf("read v3 index size %llu\n", index_size);
-    deg_ngh[m] = (char *)malloc(index_size);
-    idx_input.read((char *)deg_ngh[m], index_size);
-    idx_input.close();
-  }
-
-  // load scala data.
-  char *vector_ptr[partition_num];
-  uint32_t partition_vec_num[partition_num];
-  for (uint32_t p = 0; p < partition_num; p++) {
-    printf("Loading partition %u meta data\n", p);
-    if (!std::filesystem::exists(index_param.final_part_scala_data_path[p])) {
-      std::cout << "Error: file does not exist" << std::endl;
-      throw std::runtime_error("file does not exist");
-    }
-    std::ifstream data_input(
-        index_param.final_part_scala_data_path[p], std::ios::binary);
-    uint32_t read_pid, read_pnum, all_vec_num;
-    data_input.read((char *)&read_pid, 4);
-    data_input.read((char *)&read_pnum, 4);
-    data_input.read((char *)&partition_vec_num[p], 4);
-    data_input.read((char *)&all_vec_num, 8);
-    printf(
-        "partid %u partnum %u part_vec_num %llu all_vec_num %llu\n", read_pid,
-        read_pnum, partition_vec_num[p], all_vec_num);
-    char *enter_p_ptr = (char *)malloc(index_param.vec_size + sizeof(uint64_t));
-    data_input.read(
-        (char *)enter_p_ptr, index_param.vec_size + sizeof(uint64_t));
-
-    vector_ptr[p] = (char *)malloc(
-        (index_param.vec_size + sizeof(uint64_t)) * partition_vec_num[p]);
-    data_input.read(
-        (char *)vector_ptr[p],
-        (index_param.vec_size + sizeof(uint64_t)) * partition_vec_num[p]);
-    data_input.close();
-  }
-
-  // verify index
-  printf("Verify index ...\n");
-
-  // traverse all graph first.
-  for(size_t current_node_id = 0; current_node_id < read_max_elements_; current_node_id++) {
-    // get gt ngh.
-    uint32_t *ptr = (uint32_t *)(data_level0_memory_ +
-                                 current_node_id * size_data_per_element_);
-    std::vector<uint32_t> gt_vec;
-    for (int i = 1; i < ptr[0] + 1; i++) {
-      gt_vec.push_back(ptr[i]);
-    }
-
-    uint32_t vid_pid = judge_partition(current_node_id);
-
-    // verify data.
-    uint64_t data_ofs = current_node_id - cumupsize[vid_pid];
-    char *scala_data =
-        (char *)(vector_ptr[vid_pid] +
-                 (index_param.vec_size + sizeof(uint64_t)) * data_ofs);
-    if (memcmp(
-            scala_data,
-            data_level0_memory_ + current_node_id * size_data_per_element_ +
-                offsetData_,
-                index_param.vec_size + sizeof(uint64_t)) != 0) {
-      printf("Error: data not matched.\n");
-    }
-
-    // verify ngh.
-    size_t ofs = local_ngh_ele_size * (current_node_id - cumupsize[vid_pid]);
-    std::vector<uint32_t> scala_vec;
-    uint32_t post_cnt = 0;
-    while (true) {
-      uint8_t *ptr = (uint8_t *)(deg_ngh[vid_pid] + ofs);
-      uint8_t end_flag = ptr[1] & 0x80;
-      uint8_t local_flag = ptr[1] & 0x40;
-      uint32_t pid = ptr[1] & 0x3f;
-      uint32_t deg = ptr[0];
-
-      ofs += 2;
-      if (local_flag) {
-        // after previous stage, will put into local task queue.
-        uint32_t *ngh_ptr = (uint32_t *)(deg_ngh[vid_pid] + ofs);
-        for (uint32_t d = 0; d < deg; d++) {
-          scala_vec.push_back(ngh_ptr[d]);
-        }
-        // the local ngh must be end.
-        break;
-      } else {
-        if (deg <= INLINE_DEG_BAR) {
-          uint32_t *ngh_ptr = (uint32_t *)(deg_ngh[vid_pid] + ofs);
-          for (uint32_t d = 0; d < deg; d++) {
-            scala_vec.push_back(ngh_ptr[d]);
-          }
-          ofs += deg * 4;
-        } else {
-          uint64_t *ofs_ptr = (uint64_t *)(deg_ngh[vid_pid] + ofs);
-          uint32_t *ngh_ptr = (uint32_t *)(deg_ngh[pid] + ofs_ptr[0]);
-          for (uint32_t d = 0; d < deg; d++) {
-            scala_vec.push_back(ngh_ptr[d]);
-          }
-          ofs += 8;
-        }
-      }
-      if (end_flag) {
-        break;
-      }
-    }
-
-    if(gt_vec.size() != scala_vec.size()){
-      printf("! Mismatch node ngh size: %llu, gt sz: %llu scala sz %llu\n",
-         current_node_id, gt_vec.size(), scala_vec.size());
-      printf("gt_vec: \n");
-      for(auto gtv : gt_vec){
-        printf("%llu ", gtv);
-      }
-      printf("\n scala_vec: \n");
-      for(auto scv : scala_vec){
-        printf("%llu ", scv);
-      }
-      printf("\n");
-      abort();
-    }
-    bool mismatch = false;
-    sort(gt_vec.begin(), gt_vec.end());
-    sort(scala_vec.begin(), scala_vec.end());
-    for(uint32_t d = 0;d<gt_vec.size();d++){
-      if(gt_vec[d] != scala_vec[d]){
-        mismatch = true;
-      }
-    }
-
-    if(mismatch){
-      printf("! Mismatch node ngh: %llu, gt sz: %llu scala sz %llu\n",
-        current_node_id, gt_vec.size(), scala_vec.size());
-      printf("gt_vec: \n");
-      for(auto gtv : gt_vec){
-        printf("%llu ", gtv);
-      }
-      printf("\n scala_vec: \n");
-      for(auto scv : scala_vec){
-        printf("%llu ", scv);
-      }
-      printf("\n");
-      abort();
-    }
-    if(current_node_id % 10000 == 0){
-      printf("%.2f%% \r", current_node_id * 100.0 / read_max_elements_);
-    }
-  }
-  printf("\n");
-
-  printf("Input vertex id to verify >>>\n");
-  size_t current_node_id = 0;
-  while (std::cin >> current_node_id) {
-    // get gt ngh.
-    uint32_t *ptr = (uint32_t *)(data_level0_memory_ +
-                                 current_node_id * size_data_per_element_);
-    printf("[gt] current_node_id %llu deg %u ngh: ", current_node_id, ptr[0]);
-    for (int i = 1; i < ptr[0] + 1; i++) {
-      printf("%u ", ptr[i]);
-    }
-    printf("\n");
-
-    uint32_t vid_pid = judge_partition(current_node_id);
-
-    // verify data.
-    uint64_t data_ofs = current_node_id - cumupsize[vid_pid];
-    char *scala_data =
-        (char *)(vector_ptr[vid_pid] +
-                 (index_param.vec_size + sizeof(uint64_t)) * data_ofs);
-    if (memcmp(
-            scala_data,
-            data_level0_memory_ + current_node_id * size_data_per_element_ +
-                offsetData_,
-                index_param.vec_size + sizeof(uint64_t)) != 0) {
-      printf("Error: data not matched.\n");
-    }
-
-    // verify ngh.
-    size_t ofs = local_ngh_ele_size * (current_node_id - cumupsize[vid_pid]);
-    printf(
-        "current_node_id %llu vid_pid %u ofs %llu\n", current_node_id, vid_pid,
-        ofs);
-    uint32_t post_cnt = 0;
-    while (true) {
-      uint8_t *ptr = (uint8_t *)(deg_ngh[vid_pid] + ofs);
-      uint8_t end_flag = ptr[1] & 0x80;
-      uint8_t local_flag = ptr[1] & 0x40;
-      uint32_t pid = ptr[1] & 0x3f;
-      uint32_t deg = ptr[0];
-
-      ofs += 2;
-      if (local_flag) {
-        // after previous stage, will put into local task queue.
-        uint32_t *ngh_ptr = (uint32_t *)(deg_ngh[vid_pid] + ofs);
-        printf("> pid %u deg %u ngh: ", pid, deg);
-        for (uint32_t d = 0; d < deg; d++) {
-          printf("%u ", ngh_ptr[d]);
-        }
-        printf("\n");
-        // the local ngh must be end.
-        break;
-      } else {
-        if (deg <= INLINE_DEG_BAR) {
-          uint32_t *ngh_ptr = (uint32_t *)(deg_ngh[vid_pid] + ofs);
-          printf("> pid %u deg %u ngh: ", pid, deg);
-          for (uint32_t d = 0; d < deg; d++) {
-            printf("%u ", ngh_ptr[d]);
-          }
-          printf("\n");
-          ofs += deg * 4;
-        } else {
-          uint64_t *ofs_ptr = (uint64_t *)(deg_ngh[vid_pid] + ofs);
-          uint32_t *ngh_ptr = (uint32_t *)(deg_ngh[pid] + ofs_ptr[0]);
-          printf("> pid %u deg %u ngh: ", pid, deg);
-          for (uint32_t d = 0; d < deg; d++) {
-            printf("%u ", ngh_ptr[d]);
-          }
-          printf("\n");
-          ofs += 8;
-        }
-      }
-      if (end_flag) {
-        break;
-      }
-    }
-  }
 
   return;
 }

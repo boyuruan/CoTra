@@ -70,16 +70,6 @@ static uint64_t xgetbv(unsigned int index) {
 #define _XCR_XFEATURE_ENABLED_MASK 0
 
 typedef enum {
-  SINGLE_MACHINE,
-  B1,
-  B1_MIGRATE,
-  B1_ASYNC,
-  B1_MIGRATE_ASYNC,
-  B2,
-  B2Kmeans,
-  B2KmeansBatch,
-  ScalaANN_ASYNC,
-  ScalaANN_v2,
   ScalaANN_v3
 } AppType;
 
@@ -245,6 +235,5 @@ AlgorithmInterface<dist_t>::searchKnnCloserFirst(
 }
 }  // namespace hnswlib
 
-#include "bruteforce.h"
 #include "space_ip.h"
 #include "space_l2.h"
