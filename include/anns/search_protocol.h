@@ -232,6 +232,9 @@ class SearchProtocol {
     uint32_t core_m_sz = query->core_machine.size();
     uint32_t nxt_prop_m;
     query->sync_msg.qid = query->query_id;
+    // Token propagation can precede the first periodic sync. Both paths
+    // must filter candidates against the current query bound.
+    query->sync_msg.lower_bound = query->lowerBound;
 
     for (uint32_t m_idx = 0; m_idx < core_m_sz; m_idx++) {
       if (query->core_machine[m_idx] == transport.rdma_param.machine_id) {

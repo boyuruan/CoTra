@@ -194,8 +194,6 @@ void ScalaSearch<dist_t>::expand_candidate_batch(
   // untill end sync now.
   global_query[query_id]->sync_step++;
   if (global_query[query_id]->sync_step >= SYNC_BAR) {
-    global_query[query_id]->sync_msg.lower_bound =
-        global_query[query_id]->lowerBound;
     protocol.post_subquery_sync(global_query[query_id]);
 
     global_query[query_id]->sync_msg.clear();
