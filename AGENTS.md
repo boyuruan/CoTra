@@ -7,9 +7,10 @@ Scalable Distributed Vector Search with RDMA". It builds a graph ANN index
 partitioned across machines and searches it over RDMA. The bar is measurements
 you can trust and that can be reproduced from the committed code and scripts,
 not production hardening. On the paper cluster that is recall against ground
-truth, QPS, and latency. On this machine the NIC is Soft-RoCE on `lo`.
-Latency and QPS from that path are not a result. A search run here reports
-recall and the RDMA READ/WRITE byte and operation counts.
+truth, QPS, and latency. On this machine the transport is Soft-RoCE on `lo`
+(`-d rxe0`) or the shared-memory backend (`-d shm`). Latency and QPS from
+either are not a result. A search run here reports recall and the RDMA
+READ/WRITE byte and operation counts.
 
 ## Before you change anything
 
@@ -53,7 +54,8 @@ recall and the RDMA READ/WRITE byte and operation counts.
   `ScalaBuild::init_rdma` is 64MiB and is a different registration. Two
   processes each registering about 1GiB returned `ENOMEM` before search
   started. A larger partition needs several regions, or more processes so
-  each region stays under 1GiB.
+  each region stays under 1GiB. `-d shm` has no such cap, but it copies the
+  partition into its segment, so each process holds the partition twice.
 - Debug and profiling modes are `#define`s at the top of
   `include/anns/search_interface.h`. `COMM_PROFILE` stays defined. It only
   counts RDMA READ and WRITE posts; it does not change the query set or `ef`.
@@ -93,9 +95,23 @@ same cluster, `MACHINE_NUM`, macros, index, and flags. On that cluster a QPS
 gain with a recall drop at the same `ef` is a regression, not a speedup.
 On Soft-RoCE, every search run records recall and, for each ef, the summed
 RDMA read/write bytes and operation counts. Latency and QPS are printed and
-are not the result: this host is a software RoCE path on `lo`. OpenBLAS
-partitions are a different index from one built with the cluster MKL, so
-those two tables are not a pair.
+are not the result: this host runs Soft-RoCE on `lo` or shared memory.
+OpenBLAS partitions are a different index from one built with the cluster
+MKL, so those two tables are not a pair.
+
+Two more pairs do not match. `-d shm` and `-d rxe0` on one index give the
+same FORK, MIGRATE and Token counts at every ef, overlapping recall, and
+ReadBytes and WriteCnt within 1% up to ef 100, but from ef 150 up shm is
+5-9% lower in ReadBytes and 7-10% lower in WriteCnt (synthetic 4P, three
+runs each, ranges disjoint). A shm READ or WRITE completes when it is
+posted, so the search interleaves differently. Run both arms of a
+comparison on one backend. Runs from before the commit that holds SYNC and
+NODE_SYNC until the sub-query has started (`can_apply_sync` in
+`task_manager.h`) are not a pair with runs after it either: on rxe0
+synthetic 4P it takes Token at ef 10 from 430-450 to 402 and recall at ef
+10 from 0.945-0.9525 to 0.9575-0.9595. `sift1m_4p.txt` and the SIFT1M
+percentages below were recorded before it; each compares two runs that
+both predate it.
 
 The check that runs here is `scripts/softroce/`. `docker_test_read.sh` is
 `MACHINE_NUM=2`, `-t 1`, one rxe on `lo`, and a 512MB registration. The
@@ -119,18 +135,33 @@ ids, 0.715 of ground-truth ids off the issuing machine, and ef 100 recall
 0.9985 against `single` 0.9995. The same data at `MACHINE_NUM=2` was 1.0
 against 1.0. At 4P, `scala_v3` sits below `single` through the middle of the
 ef sweep and the two meet from ef 150. At 2P, `scala_v3` was at least
-`single` at every ef. Read a mid-ef gap on 4P against that shape.
+`single` at every ef. Read a mid-ef gap on 4P against that shape. Those
+figures are one build. `gen_synth` is seeded but the index build is not:
+three 4P builds of the same set put 0.715, 0.784 and 0.8125 of ground-truth
+ids off the issuer, so both arms of an A/B search one index
+(`SKIP_INDEX=1`).
 
-- `e2e.sh` also runs experiments on an index that already exists:
-  `SKIP_INDEX=1` searches the index in `WORKDIR`, `SKIP_SINGLE=1` skips
-  `single` and the pass rule, `SEARCH_ARGS` is appended to the `scala_v3`
-  command, and `BUILD_DIR` keeps a build across containers. `PQ_CHUNKS` and
-  `PQ_TAU` turn on the PQ gate below. `IB_DEV=shm` (or `-d shm[:tag]`) selects
-  the POSIX `/dev/shm` RDMA backend (`RdmaCommunication::com_init_shm` and
-  `RdmaContext`), which simulates one-sided READ and WRITE_WITH_IMM across
-  processes without `rdma_rxe` or `memcached` while keeping the upper
-  `RdmaCommunication` path and `COMM_PROFILE` counters unchanged.
-  `docker_e2e.sh` and `docker_test_read.sh` pass `IB_DEV` through.
+`e2e.sh` also runs experiments on an index that already exists:
+`SKIP_INDEX=1` searches the index in `WORKDIR`, `SKIP_SINGLE=1` skips
+`single` and the pass rule, `SEARCH_ARGS` is appended to the `scala_v3`
+command, and `BUILD_DIR` keeps a build across containers. `PQ_CHUNKS` and
+`PQ_TAU` turn on the PQ gate below. `docker_e2e.sh` passes these through.
+
+`IB_DEV=shm` in the softroce scripts, or `-d shm[:tag]` on a binary,
+selects the POSIX shared-memory backend (`RdmaCommunication::com_init_shm`
+and the `is_shm_mode` paths in `RdmaContext`). N processes simulate
+one-sided READ and WRITE_WITH_IMM without `rdma_rxe` or memcached.
+`RdmaCommunication` and the `COMM_PROFILE` counters are the verbs code, and
+none of the backend runs under another `-d`. `com_init` copies the
+partition into the segment, so its owner must not write the partition
+afterwards; search and `test_read` fill it first, and the index build never
+READs its buffer. Segments are `<prefix>_n<N>_m<m>`, where the prefix is
+the tag under `/dev/shm` (or the tag itself if absolute), else
+`/dev/shm/cotra_shm` (`/tmp/cotra_shm` when `/dev/shm` is under 512MiB).
+Each process unlinks its segment once every peer has mapped it. A starting
+process unlinks a leftover of its own name, so two jobs with the same N at
+once need different tags. The docker scripts pass `IB_DEV` and add
+`--ipc=host` so the container sees the host `/dev/shm`.
 
 The PQ gate (`--pq_prefix`, `--pq_tau`, `include/anns/pq_codes.h`) keeps
 PQ codes of every base vector on every machine. `tests/index/pq_encode`
@@ -279,6 +310,17 @@ parser.
   2. The two-blob set used before the current generator had that sum at 0,
   with recall 1.0 at ef 100 and 0.997 at ef 150. `gen_synth.cc` now writes
   the 8-d latent set. Its cross-machine evidence is the 4P run above.
+- **A 4P rxe0 search hung once between two ef values; the cause is not
+  known.** One of nine synthetic `MACHINE_NUM=4` `-d rxe0` runs with the
+  SYNC/NODE_SYNC hold hung entering ef 150: machine 0 printed the ef 100
+  aggregate, so every machine had sent TERMINATION, one machine never
+  printed its own ef 100 row, and all four spun until the timeout. Four
+  runs without the hold and six shm runs did not hang, too few to
+  attribute. An unverified candidate is `reset_sendrecv`: it returns once a
+  machine's own send buffers are back, so a message that reaches it later
+  is not CLEARed until the next ef while its sender waits for that buffer.
+  A backtrace of the stuck process decides it; the image has no gdb. Rerun
+  a hung job instead of reading its partial rows.
 - **The k-means shard baseline does not run end to end from committed code.**
   Building with `Kshared_nothing` does k-means partitioning, but
   `tests/scala_index.cc` has no post-build branch for it, so no b2 graph,
