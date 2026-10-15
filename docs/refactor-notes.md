@@ -36,11 +36,16 @@ boundary at the end describes the original refactor only.
    remain uninitialized, although the next assignment narrows to a 32-bit
    medoid. The declaration/read pair is retained for a separate review.
 
-5. **Top-index construction does not follow every selected distance/type.**
-   `run_sample_and_build` in `src/index/top_index.cc` constructs an L2 space for
-   float data even when `distType` requests inner product. It also uses
-   `L2SpaceI` for both signed and unsigned 8-bit data, while the query entry
-   selects different spaces for those types. These paths were not changed.
+5. **Fixed: top-index construction now matches the selected distance/type.**
+   `run_sample_and_build` in `src/index/top_index.cc` now uses
+   `InnerProductSpace` for `float + mips`, `L2Space` for `float + l2`,
+   `L2SpaceII` for `int8 + l2`, and `L2SpaceI` for `uint8 + l2`, matching
+   the query path. The signed-int8 implementation is shared with search via
+   `include/anns/space_l2_int8.h`; its distance arithmetic is unchanged.
+   Unsupported top-index distance/type combinations are rejected instead of
+   silently falling back to L2. Previously built `float + mips` and
+   `int8 + l2` top indexes must be rebuilt to correct their graph topology;
+   the stored index format is unchanged.
 
 ## Refactor validation boundary
 

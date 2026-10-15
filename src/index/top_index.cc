@@ -16,6 +16,8 @@
 #include "third_party/hnswlib/hnswlib/hnswalg.h"
 #include "third_party/hnswlib/hnswlib/hnswlib.h"
 
+#include "anns/space_l2_int8.h"
+
 bool exists_test(const char *path) {
   if (std::filesystem::exists(path)) {
     return true;
@@ -428,6 +430,12 @@ void run_sample_and_build(
     std::string label_trans_file, int M, int efConstruction, int num_threads,
     int part_num) {
 
+  if (distType != "l2" && !(distType == "mips" && dataType == "float")) {
+    throw std::invalid_argument(
+        "Top index supports l2 for float/int8/uint8 and mips for float; got " +
+        dataType + " / " + distType);
+  }
+
   float samplePercent = atof(string_samplePercent.c_str());
   std::cout << "       Part num: " << part_num << std::endl;
 
@@ -472,13 +480,18 @@ void run_sample_and_build(
 
   // 3. Build and save the HNSW index (single-threaded)
   std::cout << "Build save index with "<<dataType<<"\n ";
-  if (dataType == "float") {
+  if (dataType == "float" && distType == "mips") {
+    hnswlib::InnerProductSpace space(dimension);
+    buildAndSaveHnswIndex<float, data_t>(
+        sampledVectors, sampledVectorIds, dimension, indexPath, M,
+        efConstruction, &space, label_trans_file, distType, dataType);
+  } else if (dataType == "float") {
     hnswlib::SpaceInterface<float> *space = new hnswlib::L2Space(dimension);
     buildAndSaveHnswIndex<float, data_t>(
         sampledVectors, sampledVectorIds, dimension, indexPath, M,
         efConstruction, space, label_trans_file, distType, dataType);
   } else if (dataType == "int8") {
-    hnswlib::SpaceInterface<int> *space = new hnswlib::L2SpaceI(dimension);
+    hnswlib::SpaceInterface<int> *space = new hnswlib::L2SpaceII(dimension);
     buildAndSaveHnswIndex<int, data_t>(
         sampledVectors, sampledVectorIds, dimension, indexPath, M,
         efConstruction, space, label_trans_file, distType, dataType);
