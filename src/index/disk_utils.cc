@@ -1220,16 +1220,20 @@ void collect_replica_partition(IndexParameter &index_param) {
   uint64_t final_index_frozen = 0;
 
   // read medoid
-  local_index_reader.read((char *)&index_param.medoid, sizeof(uint32_t));
+  local_index_reader.read(
+      (char *)&index_param.workspace.medoid, sizeof(uint32_t));
   local_index_reader.read((char *)&final_index_frozen, sizeof(uint64_t));
   assert(final_index_frozen == false);
-  std::cout << "this partition enterpoint is " << index_param.medoid << "\n";
+  std::cout << "this partition enterpoint is " << index_param.workspace.medoid
+            << "\n";
   // rename medoid
-  index_param.medoid = index_param.local_replica_ids[index_param.medoid];
+  index_param.workspace.medoid =
+      index_param.workspace.local_replica_ids[index_param.workspace.medoid];
 
-  medoid_writer.write((char *)&index_param.medoid, sizeof(uint32_t));
+  medoid_writer.write((char *)&index_param.workspace.medoid, sizeof(uint32_t));
   // write renamed medoid
-  // merged_index_writer.write((char *)&index_param.medoid, sizeof(uint32_t));
+  // merged_index_writer.write((char *)&index_param.workspace.medoid,
+  // sizeof(uint32_t));
 
   // merged_index_writer.write((char *)&merged_index_frozen, sizeof(uint64_t));
   medoid_writer.close();
@@ -1239,14 +1243,14 @@ void collect_replica_partition(IndexParameter &index_param) {
   // start to compute dispatch partiton metadata.
   for (uint32_t m = 0; m < MACHINE_NUM; m++) {
     // get the num of ids and size of partition.
-    index_param.dispatch_id_num[m] = 0;
+    index_param.workspace.dispatch_id_num[m] = 0;
     // index_param.local_part2id_map[m].size();
-    index_param.dispatch_ngh_num[m] = 0;
+    index_param.workspace.dispatch_ngh_num[m] = 0;
   }
 
-  size_t nelems = index_param.local_replica_ids.size();
+  size_t nelems = index_param.workspace.local_replica_ids.size();
   for (uint32_t i = 0; i < nelems; i++) {
-    uint32_t v = index_param.local_replica_ids[i];
+    uint32_t v = index_param.workspace.local_replica_ids[i];
     uint32_t deg = 0;
     local_index_reader.read((char *)&deg, sizeof(uint32_t));
     std::vector<uint32_t> nghs(deg);
@@ -1256,19 +1260,21 @@ void collect_replica_partition(IndexParameter &index_param) {
       std::cout << "Error: some vector with 0 ngh.\n";
       abort();
     }
-    uint32_t p = index_param.kmeans_id2part_map[v];
-    index_param.dispatch_id_num[p]++;
-    index_param.dispatch_ngh_num[p] += (size_t)(deg + 1);
+    uint32_t p = index_param.workspace.kmeans_id2part_map[v];
+    index_param.workspace.dispatch_id_num[p]++;
+    index_param.workspace.dispatch_ngh_num[p] += (size_t)(deg + 1);
   }
 
   // alloc ngh memory for each dispatch partition.
   for (uint32_t m = 0; m < MACHINE_NUM; m++) {
-    index_param.dispatch_ids[m] =
-        (char *)malloc(index_param.dispatch_id_num[m] * sizeof(uint32_t));
-    index_param.dispatch_nghs[m] =
-        (char *)malloc(index_param.dispatch_ngh_num[m] * sizeof(uint32_t));
-    printf("dispatch m%u id num %llu ngh num %llu\n", m, 
-      index_param.dispatch_id_num[m], index_param.dispatch_ngh_num[m]);
+    index_param.workspace.dispatch_ids[m] = (char *)malloc(
+        index_param.workspace.dispatch_id_num[m] * sizeof(uint32_t));
+    index_param.workspace.dispatch_nghs[m] = (char *)malloc(
+        index_param.workspace.dispatch_ngh_num[m] * sizeof(uint32_t));
+    printf(
+        "dispatch m%u id num %llu ngh num %llu\n", m,
+        index_param.workspace.dispatch_id_num[m],
+        index_param.workspace.dispatch_ngh_num[m]);
   }
 
   // move reader to start and reorganize ngh
@@ -1278,25 +1284,28 @@ void collect_replica_partition(IndexParameter &index_param) {
   memset(id_offset, 0, sizeof(id_offset));
   memset(ngh_offset, 0, sizeof(ngh_offset));
   for (uint32_t i = 0; i < nelems; i++) {
-    uint32_t v = index_param.local_replica_ids[i];
-    uint32_t p = index_param.kmeans_id2part_map[v];
-    memcpy(index_param.dispatch_ids[p] + id_offset[p], &v, sizeof(uint32_t));
+    uint32_t v = index_param.workspace.local_replica_ids[i];
+    uint32_t p = index_param.workspace.kmeans_id2part_map[v];
+    memcpy(
+        index_param.workspace.dispatch_ids[p] + id_offset[p], &v,
+        sizeof(uint32_t));
     id_offset[p] += sizeof(uint32_t);
 
     local_index_reader.read(
-        (char *)(index_param.dispatch_nghs[p] + ngh_offset[p]),
+        (char *)(index_param.workspace.dispatch_nghs[p] + ngh_offset[p]),
         sizeof(uint32_t));
-    uint32_t deg = *(uint32_t *)(index_param.dispatch_nghs[p] + ngh_offset[p]);
+    uint32_t deg =
+        *(uint32_t *)(index_param.workspace.dispatch_nghs[p] + ngh_offset[p]);
     ngh_offset[p] += sizeof(uint32_t);
 
     if (deg > 0) {
       uint32_t remap_ngh[deg];
       local_index_reader.read((char *)remap_ngh, deg * sizeof(uint32_t));
       for (uint32_t j = 0; j < deg; j++) {
-        remap_ngh[j] = index_param.local_replica_ids[remap_ngh[j]];
+        remap_ngh[j] = index_param.workspace.local_replica_ids[remap_ngh[j]];
       }
       memcpy(
-          index_param.dispatch_nghs[p] + ngh_offset[p], remap_ngh,
+          index_param.workspace.dispatch_nghs[p] + ngh_offset[p], remap_ngh,
           deg * sizeof(uint32_t));
       ngh_offset[p] += deg * sizeof(uint32_t);
     }
@@ -1320,7 +1329,7 @@ void merge_replica_partition(IndexParameter &index_param) {
 
   size_t collect_id_num = 0;
   for (uint32_t m = 0; m < MACHINE_NUM; m++) {
-    collect_id_num += index_param.collect_id_num[m];
+    collect_id_num += index_param.workspace.collect_id_num[m];
   }
 
   // find max node id
@@ -1344,8 +1353,8 @@ void merge_replica_partition(IndexParameter &index_param) {
   std::cout << "collect_id_num: " << collect_id_num << std::endl;
   for (uint32_t m = 0; m < MACHINE_NUM; m++) {
     diskann::cout << "Creating inverse map -- shard #" << m << std::endl;
-    uint32_t *collect_ids = (uint32_t *)index_param.collected_ids[m];
-    for (size_t idx = 0; idx < index_param.collect_id_num[m]; idx++) {
+    uint32_t *collect_ids = (uint32_t *)index_param.workspace.collected_ids[m];
+    for (size_t idx = 0; idx < index_param.workspace.collect_id_num[m]; idx++) {
       node_shard.push_back(std::make_pair(collect_ids[idx], (uint32_t)m));
     }
   }
@@ -1373,7 +1382,8 @@ void merge_replica_partition(IndexParameter &index_param) {
   diskann::cout << "max_degree: " << max_degree << std::endl;
   merged_vamana_writer.write((char *)&max_degree, sizeof(uint32_t));
 
-  merged_vamana_writer.write((char *)&index_param.medoid, sizeof(uint32_t));
+  merged_vamana_writer.write(
+      (char *)&index_param.workspace.medoid, sizeof(uint32_t));
   size_t merged_index_frozen = 0;
   merged_vamana_writer.write((char *)&merged_index_frozen, sizeof(uint64_t));
 
@@ -1390,7 +1400,7 @@ void merge_replica_partition(IndexParameter &index_param) {
   uint32_t p_offset[MACHINE_NUM];
   uint32_t *p_nghs_ptr[MACHINE_NUM];
   for (uint32_t m = 0; m < MACHINE_NUM; m++) {
-    p_nghs_ptr[m] = (uint32_t *)index_param.collected_nghs[m];
+    p_nghs_ptr[m] = (uint32_t *)index_param.workspace.collected_nghs[m];
     p_offset[m] = 0;
   }
 
@@ -1477,12 +1487,15 @@ void merge_replica_partition(IndexParameter &index_param) {
   merged_vamana_writer.close();
 
   for(uint32_t m = 0;m < MACHINE_NUM;m++){
-
-    if(index_param.dispatch_nghs[m]!=nullptr) free(index_param.dispatch_nghs[m]);
-    if(index_param.dispatch_ids[m]!=nullptr) free(index_param.dispatch_ids[m]);
+    if (index_param.workspace.dispatch_nghs[m] != nullptr)
+      free(index_param.workspace.dispatch_nghs[m]);
+    if (index_param.workspace.dispatch_ids[m] != nullptr)
+      free(index_param.workspace.dispatch_ids[m]);
     if(m == index_param.machine_id) continue;
-    if(index_param.collected_nghs[m]!=nullptr) free(index_param.collected_nghs[m]);
-    if(index_param.collected_ids[m]!=nullptr) free(index_param.collected_ids[m]);
+    if (index_param.workspace.collected_nghs[m] != nullptr)
+      free(index_param.workspace.collected_nghs[m]);
+    if (index_param.workspace.collected_ids[m] != nullptr)
+      free(index_param.workspace.collected_ids[m]);
   }
 
   return;

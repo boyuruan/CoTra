@@ -8,7 +8,9 @@
 
 #include "../rdma/rdma_param.h"
 #include "anns/anns_param.h"
-#include "anns/query_msg.h"
+#include "anns/protocol/query_codec.h"
+#include "anns/query_state.h"
+#include "anns/query_sync.h"
 #include "anns/scala_scheduler.h"
 #include "anns/vec_buffer.h"
 
@@ -54,7 +56,7 @@ class TaskManager {
   uint32_t cur_query_num{0};
 
   // For migration.
-  QueryMsg<dist_t>** global_query{nullptr};
+  QueryState<dist_t>** global_query{nullptr};
   std::vector<size_t> query_queue;
   // Global id to the machine holding it. A forked query rebuilds its seed
   // set with it; the search sets it before any fork can arrive.
@@ -289,8 +291,8 @@ class TaskManager {
 
     for (uint32_t i = 0; i < size; i++) {
       NonCoreSyncMsg<dist_t> sync_msg(ptr, offset);
-      global_query[sync_msg.qid]->update_sub_query_from_noncore(
-          local_id, &sync_msg);
+      QuerySynchronization<dist_t>::apply_noncore(
+          *global_query[sync_msg.qid], local_id, &sync_msg);
       // avoke the query.
       if (global_query[sync_msg.qid]->state == PAUSE) {
         // printf("sync voke q%u\n", sync_msg.qid);
@@ -309,7 +311,7 @@ class TaskManager {
   void push_compute(
       uint32_t machine_id, uint32_t query_id,
       std::vector<std::pair<uint32_t, char*>>& id_ptr) {
-    abort(); // TODO: this func never use for scala mode.
+    abort();  // TODO: this func never use for scala mode.
     compute_queue[machine_id].emplace_back(query_id, 0, 136);  // qid, count,
     size_t cmp_post_sz = compute_queue[machine_id].size();
     ComputeMsg* cmp_msg = &compute_queue[machine_id][cmp_post_sz - 1];
@@ -350,13 +352,15 @@ class TaskManager {
   }
 
   void deserialize_query(char* ptr) {
-    uint32_t qid = QueryMsg<dist_t>::wire_qid(ptr);
-    if (QueryMsg<dist_t>::wire_kind(ptr) == QueryMsg<dist_t>::QW_FORK &&
+    uint32_t qid = QueryWireCodec<dist_t>::wire_qid(ptr);
+    if (QueryWireCodec<dist_t>::wire_kind(ptr) ==
+            QueryWireCodec<dist_t>::QW_FORK &&
         !machine_of) {
       printf("Error: fork of q%u arrived before machine_of was set\n", qid);
       abort();
     }
-    global_query[qid]->deserialize_and_merge(ptr, local_id, machine_of);
+    QueryWireCodec<dist_t>::decode_into(
+        *global_query[qid], ptr, local_id, machine_of);
     query_queue.push_back(qid);
     return;
   }
@@ -396,8 +400,8 @@ class TaskManager {
    */
   void deserialize_sync(char* ptr) {
     SyncMsg<dist_t> sync_msg(ptr, local_id);
-    global_query[sync_msg.qid]->update_sub_query(
-        local_id, &sync_msg, ba_task_queue);
+    QuerySynchronization<dist_t>::apply_core(
+        *global_query[sync_msg.qid], local_id, &sync_msg, ba_task_queue);
     // avoke the query.
     if (global_query[sync_msg.qid]->state == PAUSE) {
       // printf("sync voke q%u\n", sync_msg.qid);

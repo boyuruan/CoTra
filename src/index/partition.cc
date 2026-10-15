@@ -887,7 +887,7 @@ int shard_data_into_random(IndexParameter &index_param, const size_t num_centers
   }
 
   for (uint32_t m = 0; m < num_centers; m++) {
-    index_param.partition_size[m] = index_param.vec_num/num_centers;
+    index_param.workspace.partition_size[m] = index_param.vec_num / num_centers;
   }
 
   size_t total_count = 0;

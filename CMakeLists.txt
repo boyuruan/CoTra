@@ -91,7 +91,7 @@ if(COTRA_WITH_INDEX)
     $<INSTALL_INTERFACE:include>
     ${CMAKE_SOURCE_DIR}/third_party/compat
   )
-  target_link_libraries(rdma_index PUBLIC OpenBLAS::OpenBLAS)
+  target_link_libraries(rdma_index PUBLIC rdma_anns OpenBLAS::OpenBLAS)
 endif()
 
 add_subdirectory(tests)
